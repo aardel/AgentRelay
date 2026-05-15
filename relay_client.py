@@ -415,6 +415,38 @@ def _interactive_launch_command(adapter_id: str, adapter) -> str:
     return " ".join(cleaned) if cleaned else (parts[0] if parts else adapter_id)
 
 
+def send_to_peer(cfg: Config, addr: str, port: int,
+                 command: str, agent: str | None = None) -> tuple[bool, str]:
+    """Dispatch a command to a remote peer's /dispatch endpoint."""
+    import uuid as _uuid
+    payload: dict = {
+        "from": cfg.node_name,
+        "command": command,
+        "request_id": _uuid.uuid4().hex,
+    }
+    if agent:
+        payload["agent"] = agent
+
+    async def _post():
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"http://{addr}:{port}/dispatch",
+                json=payload,
+                headers={"X-Agent-Token": cfg.token},
+            ) as resp:
+                data = await resp.json()
+                return resp.status, data
+
+    try:
+        status, data = _run(_post())
+        if status == 200:
+            return True, "Sent"
+        return False, data.get("error", f"HTTP {status}")
+    except Exception as e:
+        return False, str(e)
+
+
 def launch_agent(cfg: Config, agent_id: str) -> str:
     """Open the agent in a terminal and send it the AgentRelay instructions."""
     if agent_id not in cfg.adapters:

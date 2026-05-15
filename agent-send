@@ -90,6 +90,39 @@ async def cmd_list(self_name: str | None = None) -> int:
     return 0
 
 
+async def cmd_broadcast(token: str, message: str, agent: str | None,
+                        self_name: str | None = None) -> int:
+    """Send message to all discovered peers with no synthesis — fire and forget."""
+    peers = await discover(timeout=2.5)
+    me = self_name or socket.gethostname().split(".")[0]
+    targets = {name: addr for name, addr in peers.items() if name != me}
+    if not targets:
+        print("no peers discovered to broadcast to", file=sys.stderr)
+        return 1
+    results = []
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=5)
+    for name, (addr, port) in targets.items():
+        payload: dict = {
+            "task": message,
+            "agents": [{"node": name, "agent": agent or "claude"}],
+            "coordinator_agent": None,
+            "mode": "parallel",
+        }
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            try:
+                async with session.post(
+                    f"http://{addr}:{port}/coordinate",
+                    json=payload,
+                    headers={"X-Agent-Token": token},
+                ) as resp:
+                    data = await resp.json()
+                results.append({"node": name, "ok": True, "data": data})
+            except aiohttp.ClientError as e:
+                results.append({"node": name, "ok": False, "error": str(e)})
+    print(json.dumps(results, indent=2))
+    return 0 if all(r["ok"] for r in results) else 1
+
+
 async def cmd_send(token: str, target: str, command: str,
                    agent: str | None, policy_hint: str | None,
                    self_name: str | None = None) -> int:
@@ -151,6 +184,8 @@ def main() -> None:
                      help="force the user-approval dialog on target")
     grp.add_argument("--reject", action="store_const", dest="hint",
                      const="reject", help="(test) ask target to reject")
+    p.add_argument("--broadcast", action="store_true",
+                   help="send to all discovered peers (no synthesis)")
     args = p.parse_args()
 
     token = load_token(args.config)
@@ -162,6 +197,12 @@ def main() -> None:
 
     if args.list:
         sys.exit(asyncio.run(cmd_list(self_name=node_name)))
+
+    if args.broadcast:
+        if not args.command:
+            p.error("command required for --broadcast")
+        sys.exit(asyncio.run(cmd_broadcast(
+            token, args.command, args.agent, self_name=node_name)))
 
     if not args.target or not args.command:
         p.error("target and command required (or use --list)")

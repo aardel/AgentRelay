@@ -879,6 +879,164 @@ class AgentRelay:
             "status": result.get("status"),
         })
 
+    async def handle_coordinate(self, request: web.Request) -> web.Response:
+        """Fan a task out to multiple agents, collect results, optionally synthesize."""
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        task = (body.get("task") or "").strip()
+        agents = body.get("agents") or []
+        coordinator_agent = body.get("coordinator_agent") or self.cfg.default_agent
+        mode = body.get("mode", "parallel")
+        thread_id = body.get("thread_id")
+
+        if not task:
+            return web.json_response({"error": "missing task"}, status=400)
+        if not agents:
+            return web.json_response({"error": "missing agents"}, status=400)
+        if mode not in ("parallel", "sequential"):
+            return web.json_response({"error": "mode must be parallel or sequential"}, status=400)
+
+        local_node = self.cfg.node_name
+
+        async def _enrich(entry: dict) -> dict:
+            """Add role/capabilities from /info if not supplied by caller."""
+            entry = dict(entry)
+            if "role" in entry and "capabilities" in entry:
+                return entry
+            node, agent = entry.get("node", local_node), entry.get("agent", "")
+            if node == local_node:
+                spec = self.cfg.adapters.get(agent)
+                if spec:
+                    entry.setdefault("role", spec.role or "")
+                    entry.setdefault("capabilities", spec.capabilities or [])
+            else:
+                peer = self.peers.peers.get(node)
+                if peer:
+                    try:
+                        t = aiohttp.ClientTimeout(total=3)
+                        async with aiohttp.ClientSession(timeout=t) as s:
+                            async with s.get(
+                                f"http://{peer.address}:{peer.port}/info",
+                                headers={"X-Agent-Token": self.cfg.token},
+                            ) as r:
+                                if r.status == 200:
+                                    info = await r.json()
+                                    spec = (info.get("adapters") or {}).get(agent, {})
+                                    entry.setdefault("role", spec.get("role", ""))
+                                    entry.setdefault("capabilities", spec.get("capabilities", []))
+                    except Exception:
+                        pass
+            entry.setdefault("role", "")
+            entry.setdefault("capabilities", [])
+            return entry
+
+        async def _call_agent(entry: dict, message: str) -> dict:
+            node = entry.get("node", local_node)
+            agent = entry["agent"]
+            role = entry.get("role", "")
+            caps = entry.get("capabilities", [])
+            if node == local_node:
+                if agent not in self.cfg.adapters:
+                    return {"node": node, "agent": agent, "role": role,
+                            "capabilities": caps, "content": "",
+                            "error": f"unknown local agent: {agent}"}
+                talk_cfg = dataclasses.replace(self.cfg, use_tmux=False)
+                result = await spawn_agent(talk_cfg, self.cfg.adapters[agent], message)
+                content = (result.get("stdout") or "").strip()
+                if not content:
+                    content = (result.get("stderr") or "").strip()
+                return {"node": node, "agent": agent, "role": role,
+                        "capabilities": caps, "content": content,
+                        "exit_code": result.get("exit_code")}
+            else:
+                peer = self.peers.peers.get(node)
+                if not peer:
+                    return {"node": node, "agent": agent, "role": role,
+                            "capabilities": caps, "content": "",
+                            "error": f"peer not found: {node}"}
+                try:
+                    payload = {
+                        "thread_id": thread_id,
+                        "from_node": local_node,
+                        "from_agent": coordinator_agent,
+                        "to_agent": agent,
+                        "message": message,
+                    }
+                    t = aiohttp.ClientTimeout(total=None, sock_connect=5)
+                    async with aiohttp.ClientSession(timeout=t) as s:
+                        async with s.post(
+                            f"http://{peer.address}:{peer.port}/talk",
+                            json=payload,
+                            headers={"X-Agent-Token": self.cfg.token},
+                        ) as r:
+                            data = await r.json()
+                    content = (data.get("reply") or {}).get("content") or ""
+                    return {"node": node, "agent": agent, "role": role,
+                            "capabilities": caps, "content": content,
+                            "thread_id": data.get("thread_id")}
+                except Exception as e:
+                    return {"node": node, "agent": agent, "role": role,
+                            "capabilities": caps, "content": "", "error": str(e)}
+
+        def _role_prefix(entry: dict) -> str:
+            role = entry.get("role", "")
+            caps = entry.get("capabilities", [])
+            if not role and not caps:
+                return ""
+            caps_str = ", ".join(caps) if caps else "general"
+            return f"[Role: {role} | Capabilities: {caps_str}]\n\n"
+
+        # Enrich all entries with role/capabilities
+        agents = await asyncio.gather(*[_enrich(a) for a in agents])
+
+        # Fan out
+        agent_results: list[dict]
+        if mode == "sequential":
+            agent_results = []
+            for entry in agents:
+                prior = "\n".join(
+                    f"[{r['agent']}@{r['node']}]: {r['content']}"
+                    for r in agent_results if r.get("content")
+                )
+                context = f"\n\nContext from prior agents:\n{prior}" if prior else ""
+                message = _role_prefix(entry) + task + context
+                agent_results.append(await _call_agent(entry, message))
+        else:
+            tasks = [_call_agent(e, _role_prefix(e) + task) for e in agents]
+            agent_results = list(await asyncio.gather(*tasks))
+
+        # Synthesis (skipped when coordinator_agent is None — broadcast mode)
+        synthesis: str | None = None
+        if coordinator_agent and coordinator_agent in self.cfg.adapters:
+            lines = [
+                "You are coordinating a multi-agent task via AgentRelay.",
+                f"Original task: {task}", "",
+                "Results from each agent:",
+            ]
+            for r in agent_results:
+                role_tag = f" ({r['role']})" if r.get("role") else ""
+                lines.append(f"\n[{r['agent']}@{r['node']}{role_tag}]:")
+                lines.append(r.get("content") or r.get("error") or "(no response)")
+            lines += ["", "Synthesize these results into a coherent, actionable response."]
+            talk_cfg = dataclasses.replace(self.cfg, use_tmux=False)
+            synth = await spawn_agent(
+                talk_cfg, self.cfg.adapters[coordinator_agent], "\n".join(lines))
+            synthesis = (synth.get("stdout") or "").strip() or None
+
+        thread_ids = [r["thread_id"] for r in agent_results if r.get("thread_id")]
+        return web.json_response({
+            "coordinator": {"node": local_node, "agent": coordinator_agent},
+            "thread_id": thread_ids[0] if thread_ids else None,
+            "mode": mode,
+            "agent_results": agent_results,
+            "synthesis": synthesis,
+        })
+
     async def handle_talk_threads(self, request: web.Request) -> web.Response:
         if not self._auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -902,6 +1060,7 @@ class AgentRelay:
         app.router.add_get("/setup", self.handle_setup)
         app.router.add_post("/forward", self.handle_forward)
         app.router.add_post("/talk", self.handle_talk)
+        app.router.add_post("/coordinate", self.handle_coordinate)
         app.router.add_get("/talk/threads", self.handle_talk_threads)
         app.router.add_get("/talk/threads/{thread_id}", self.handle_talk_thread)
         app.router.add_post("/pair/request", self.handle_pair_request)

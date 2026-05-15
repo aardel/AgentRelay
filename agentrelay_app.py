@@ -25,6 +25,7 @@ from relay_client import (
     relay_running,
     remove_all_skills,
     remove_skill,
+    send_to_peer,
     skill_names,
     start_relay,
     stop_relay,
@@ -170,6 +171,30 @@ class AgentRelayApp(tk.Tk):
         ttk.Button(sk_all_row, text="Install All", command=self._install_all_skills).pack(
             side=tk.RIGHT)
 
+        # Prompt — send a message to any peer agent directly from the GUI
+        pm = ttk.LabelFrame(self, text="Send a message", style="Card.TLabelframe", padding=10)
+        pm.pack(fill=tk.X, **pad)
+        pm_top = ttk.Frame(pm)
+        pm_top.pack(fill=tk.X)
+        ttk.Label(pm_top, text="To").pack(side=tk.LEFT)
+        self.prompt_peer_var = tk.StringVar()
+        self.prompt_peer_combo = ttk.Combobox(pm_top, textvariable=self.prompt_peer_var,
+                                               state="readonly", width=14)
+        self.prompt_peer_combo.pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Label(pm_top, text="Agent").pack(side=tk.LEFT)
+        self.prompt_agent_var = tk.StringVar()
+        self.prompt_agent_combo = ttk.Combobox(pm_top, textvariable=self.prompt_agent_var,
+                                                state="readonly", width=16)
+        self.prompt_agent_combo.pack(side=tk.LEFT, padx=(4, 0))
+        self.prompt_peer_combo.bind("<<ComboboxSelected>>", lambda _: self._refresh_prompt_agents())
+        self.prompt_text = tk.Text(pm, height=4, wrap=tk.WORD,
+                                   font=("Segoe UI", 10))
+        self.prompt_text.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(pm, text="Send", command=self._send_prompt).pack(
+            anchor=tk.E, pady=(4, 0))
+
+        self._nearby_peers: list[dict] = []
+
         self.footer = tk.StringVar()
         ttk.Label(self, textvariable=self.footer, style="Sub.TLabel", padding=6).pack(fill=tk.X)
 
@@ -272,6 +297,46 @@ class AgentRelayApp(tk.Tk):
         self.footer.set(f"Removed {len(results)} skills from {target}")
         self._refresh_skill_status()
 
+    # ── Prompt window ─────────────────────────────────────────────────────────
+
+    def _refresh_prompt_agents(self) -> None:
+        peer_name = self.prompt_peer_var.get()
+        peer = next((p for p in self._nearby_peers if p["name"] == peer_name), None)
+        agents = peer["_agents_list"] if peer else []
+        self.prompt_agent_combo["values"] = agents
+        self.prompt_agent_var.set(agents[0] if agents else "")
+
+    def _send_prompt(self) -> None:
+        peer_name = self.prompt_peer_var.get()
+        agent = self.prompt_agent_var.get() or None
+        text = self.prompt_text.get("1.0", tk.END).strip()
+        if not peer_name:
+            messagebox.showwarning("AgentRelay", "Select a peer first.")
+            return
+        if not text:
+            messagebox.showwarning("AgentRelay", "Enter a message to send.")
+            return
+        peer = next((p for p in self._nearby_peers if p["name"] == peer_name), None)
+        if not peer:
+            messagebox.showerror("AgentRelay", f"Peer not found: {peer_name}")
+            return
+        addr, port = peer["address"], peer["port"]
+        self.footer.set(f"Sending to {peer_name}…")
+        self.prompt_text.configure(state=tk.DISABLED)
+
+        def _work():
+            ok, msg = send_to_peer(self.cfg, addr, port, text, agent)
+            def _done():
+                self.prompt_text.configure(state=tk.NORMAL)
+                if ok:
+                    self.prompt_text.delete("1.0", tk.END)
+                self.footer.set(
+                    f"Sent to {peer_name}" if ok else f"Failed: {msg}"
+                )
+            self.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
     # ── Peers ─────────────────────────────────────────────────────────────────
 
     def _on_connect(self, peer: str) -> None:
@@ -331,6 +396,24 @@ class AgentRelayApp(tk.Tk):
         for w in self.nearby_frame.winfo_children():
             w.destroy()
         nearby = data.get("nearby") or []
+
+        # Store for prompt window lookups; keep agents as a list
+        self._nearby_peers = []
+        for p in nearby:
+            agents_raw = p.get("agents", "")
+            if isinstance(agents_raw, list):
+                agents_list = agents_raw
+            else:
+                agents_list = [a.strip() for a in str(agents_raw).split(",") if a.strip()]
+            self._nearby_peers.append({**p, "_agents_list": agents_list})
+
+        connected_names = [p["name"] for p in nearby if p.get("connected")]
+        prev_peer = self.prompt_peer_var.get()
+        self.prompt_peer_combo["values"] = connected_names
+        if prev_peer not in connected_names:
+            self.prompt_peer_var.set(connected_names[0] if connected_names else "")
+            self._refresh_prompt_agents()
+
         if not nearby:
             ttk.Label(
                 self.nearby_frame,
