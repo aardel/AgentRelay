@@ -73,6 +73,12 @@ class AdapterConfig:
     session: str | None = None      # tmux session name for interactive mode
     label: str | None = None        # friendly name shown in the app
     window_title: str | None = None # window title fragment to focus before typing
+    role: str | None = None         # e.g. "reasoning" | "execution" | "review"
+    capabilities: list[str] = None  # e.g. ["planning", "synthesis"] or ["code_edit", "tests"]
+
+    def __post_init__(self) -> None:
+        if self.capabilities is None:
+            self.capabilities = []
 
 
 @dataclass
@@ -133,11 +139,12 @@ class Config:
         out = []
         for name, spec in self.adapters.items():
             mode = "visible" if spec.mode in INTERACTIVE_MODES else "background"
-            out.append({
-                "id": name,
-                "label": spec.label or name,
-                "mode": mode,
-            })
+            entry: dict = {"id": name, "label": spec.label or name, "mode": mode}
+            if spec.role:
+                entry["role"] = spec.role
+            if spec.capabilities:
+                entry["capabilities"] = spec.capabilities
+            out.append(entry)
         return out
 
 
@@ -578,10 +585,18 @@ class AgentRelay:
     async def handle_info(self, request: web.Request) -> web.Response:
         if not self._auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
+        adapters = {}
+        for name, spec in self.cfg.adapters.items():
+            entry: dict = {"mode": spec.mode, "label": spec.label or name}
+            if spec.role:
+                entry["role"] = spec.role
+            if spec.capabilities:
+                entry["capabilities"] = spec.capabilities
+            adapters[name] = entry
         return web.json_response({
             "node": self.cfg.node_name,
             "port": self.cfg.port,
-            "adapters": list(self.cfg.adapters.keys()),
+            "adapters": adapters,
             "rules": [r.__dict__ for r in self.cfg.rules],
         })
 

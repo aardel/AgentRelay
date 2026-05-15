@@ -15,20 +15,28 @@ trusted_peers: []
 adapters:
   claude:
     label: Claude
+    role: reasoning
+    capabilities: [planning, synthesis, review]
     command: ["claude", "-p", "{prompt}"]
     timeout: 1800
   codex:
     label: Codex
+    role: execution
+    capabilities: [code_edit, tests, debugging]
     command: ["codex", "exec", "--skip-git-repo-check", "{prompt}"]
     timeout: 1800
   codex-visible:
     label: Codex (visible window)
     mode: interactive
+    role: execution
+    capabilities: [code_edit, tests, debugging]
     session: agentrelay-codex
     command: ["codex"]
     timeout: 1800
   gemini:
     label: Gemini
+    role: reasoning
+    capabilities: [planning, research, synthesis]
     command: ["gemini", "-p", "{prompt}"]
     timeout: 1800
 
