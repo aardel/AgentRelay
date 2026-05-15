@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""
+agent-send - send a command to a peer agentrelay node.
+
+Examples:
+    agent-send --list
+    agent-send test-bench "install esp-idf v6.1"
+    agent-send test-bench --agent codex "fix the failing build in ~/proj"
+    agent-send test-bench --auto "uname -a && df -h"
+    agent-send test-bench --approve "rm -rf node_modules && npm ci"
+
+The target name must match the `node_name` field on the destination
+machine's config (defaults to its hostname).
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import socket
+import sys
+import uuid
+from pathlib import Path
+
+import aiohttp
+import yaml
+from zeroconf import IPVersion, ServiceStateChange
+from zeroconf.asyncio import (AsyncServiceBrowser, AsyncServiceInfo,
+                              AsyncZeroconf)
+
+SERVICE_TYPE = "_agentrelay._tcp.local."
+DEFAULT_CONFIG = Path.home() / ".config" / "agentrelay" / "config.yaml"
+
+
+def load_token(config_path: Path) -> str:
+    if not config_path.exists():
+        print(f"no config at {config_path}\n"
+              f"run: agentrelay --init", file=sys.stderr)
+        sys.exit(1)
+    data = yaml.safe_load(config_path.read_text())
+    token = data.get("token")
+    if not token:
+        print("no token in config", file=sys.stderr)
+        sys.exit(1)
+    return token
+
+
+async def _resolve(azc: AsyncZeroconf, name: str, results: dict) -> None:
+    info = AsyncServiceInfo(SERVICE_TYPE, name)
+    if not await info.async_request(azc.zeroconf, 2000):
+        return
+    node = info.properties.get(b"node", b"").decode() or name.split(".")[0]
+    addrs = info.parsed_scoped_addresses()
+    if addrs:
+        results[node] = (addrs[0], info.port)
+
+
+async def discover(timeout: float = 2.0) -> dict[str, tuple[str, int]]:
+    """Return {node_name: (ip, port)} for every peer seen within timeout."""
+    azc = AsyncZeroconf(ip_version=IPVersion.V4Only)
+    results: dict[str, tuple[str, int]] = {}
+
+    def handler(zc=None, service_type=None, name=None, state_change=None,
+                **kwargs):
+        name = name or kwargs.get("name")
+        state_change = state_change or kwargs.get("state_change")
+        if state_change == ServiceStateChange.Added:
+            asyncio.ensure_future(_resolve(azc, name, results))
+
+    browser = AsyncServiceBrowser(azc.zeroconf, [SERVICE_TYPE],
+                                   handlers=[handler])
+    await asyncio.sleep(timeout)
+    await browser.async_cancel()
+    await azc.async_close()
+    return results
+
+
+async def cmd_list(self_name: str | None = None) -> int:
+    peers = await discover(timeout=2.5)
+    if not peers:
+        print("no peers discovered")
+        return 1
+    me = self_name or socket.gethostname().split(".")[0]
+    print(f"{'node':<20}  {'address':<16}  {'port':<6}  self?")
+    print(f"{'-' * 20}  {'-' * 16}  {'-' * 6}  -----")
+    for node, (addr, port) in sorted(peers.items()):
+        marker = "*" if node == me else ""
+        print(f"{node:<20}  {addr:<16}  {port:<6}  {marker}")
+    return 0
+
+
+async def cmd_send(token: str, target: str, command: str,
+                   agent: str | None, policy_hint: str | None,
+                   self_name: str | None = None) -> int:
+    peers = await discover(timeout=2.5)
+    if target not in peers:
+        print(f"peer not found: {target}", file=sys.stderr)
+        if peers:
+            print(f"available: {', '.join(sorted(peers))}", file=sys.stderr)
+        else:
+            print("no peers discovered on the LAN", file=sys.stderr)
+        return 1
+    addr, port = peers[target]
+    url = f"http://{addr}:{port}/dispatch"
+    payload: dict = {
+        "from": self_name or socket.gethostname().split(".")[0],
+        "command": command,
+        "request_id": uuid.uuid4().hex,
+    }
+    if agent:
+        payload["agent"] = agent
+    if policy_hint:
+        payload["policy_hint"] = policy_hint
+
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        try:
+            async with session.post(
+                url, json=payload,
+                headers={"X-Agent-Token": token},
+            ) as resp:
+                data = await resp.json()
+        except aiohttp.ClientError as e:
+            print(f"request failed: {e}", file=sys.stderr)
+            return 1
+
+    print(json.dumps(data, indent=2))
+    return 0 if data.get("exit_code", 1) == 0 else 1
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        prog="agent-send",
+        description="Send a command to a peer agentrelay node.",
+    )
+    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    p.add_argument("--list", action="store_true",
+                   help="list discovered peers and exit")
+    p.add_argument("target", nargs="?", help="target node name")
+    p.add_argument("command", nargs="?",
+                   help="natural-language request or shell command")
+    p.add_argument("--agent",
+                   help="hand to a specific local agent on the target")
+    grp = p.add_mutually_exclusive_group()
+    grp.add_argument("--auto", action="store_const", dest="hint",
+                     const="auto",
+                     help="ask target to auto-execute as shell")
+    grp.add_argument("--approve", action="store_const", dest="hint",
+                     const="approve",
+                     help="force the user-approval dialog on target")
+    grp.add_argument("--reject", action="store_const", dest="hint",
+                     const="reject", help="(test) ask target to reject")
+    args = p.parse_args()
+
+    token = load_token(args.config)
+
+    node_name = None
+    if args.config.exists():
+        _cfg_data = yaml.safe_load(args.config.read_text())
+        node_name = _cfg_data.get("node_name") or socket.gethostname().split(".")[0]
+
+    if args.list:
+        sys.exit(asyncio.run(cmd_list(self_name=node_name)))
+
+    if not args.target or not args.command:
+        p.error("target and command required (or use --list)")
+
+    sys.exit(asyncio.run(cmd_send(
+        token, args.target, args.command, args.agent, args.hint,
+        self_name=node_name)))
+
+
+if __name__ == "__main__":
+    main()

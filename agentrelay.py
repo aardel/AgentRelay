@@ -1,0 +1,1026 @@
+#!/usr/bin/env python3
+"""
+agentrelay - peer-to-peer AI agent command relay.
+
+Each machine runs this daemon. It:
+  - Advertises itself via mDNS as _agentrelay._tcp.local.
+  - Discovers peer machines automatically on the LAN.
+  - Accepts commands via HTTP (token-authenticated).
+  - Routes each command via a policy engine:
+        auto     - whitelist auto-execute without a shell
+        agent    - hand to a local AI agent CLI (claude/codex/gemini)
+        approve  - native OS dialog blocks until user approves
+        reject   - refuse
+
+Usage:
+    agentrelay --init        # write a default config and a fresh token
+    agentrelay               # run the daemon (reads ~/.config/agentrelay/config.yaml)
+    agentrelay --verbose     # debug logging
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import dataclasses
+import json
+import logging
+import os
+import platform
+import re
+import secrets
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+from aiohttp import web
+from zeroconf import IPVersion, ServiceInfo, ServiceStateChange
+from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
+
+from pairing import PairingManager
+from talk import ConversationStore
+
+SERVICE_TYPE = "_agentrelay._tcp.local."
+INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
+DEFAULT_PORT = 9876
+DEFAULT_CONFIG = Path.home() / ".config" / "agentrelay" / "config.yaml"
+AUTO_ALLOWLIST = {"uname", "hostname", "whoami", "pwd", "ls", "df", "free",
+                  "uptime", "date", "id"}
+
+log = logging.getLogger("agentrelay")
+
+
+# ============================================================
+# Configuration
+# ============================================================
+
+@dataclass
+class AdapterConfig:
+    """How to invoke a local AI agent CLI in headless / one-shot mode."""
+    name: str
+    command: list[str]   # e.g. ["claude", "-p", "{prompt}"]
+    timeout: int = 1800  # seconds
+    mode: str = "headless"          # "headless" | "interactive" | "interactive_tmux"
+    session: str | None = None      # tmux session name for interactive mode
+    label: str | None = None        # friendly name shown in the app
+    window_title: str | None = None # window title fragment to focus before typing
+
+
+@dataclass
+class PolicyRule:
+    """A single pattern-matched routing rule."""
+    pattern: str
+    action: str          # "auto" | "agent" | "approve" | "reject"
+    agent: str | None = None   # which adapter for action="agent"
+
+
+@dataclass
+class Config:
+    node_name: str
+    port: int
+    token: str
+    adapters: dict[str, AdapterConfig]
+    rules: list[PolicyRule]
+    default_action: str          # one of: auto | agent | approve | reject
+    default_agent: str | None
+    approve_timeout: int         # seconds for dialog to wait
+    use_tmux: bool
+    wait_before_send_seconds: int
+    trusted_peers: list[str]
+
+    @classmethod
+    def load(cls, path: Path) -> "Config":
+        return cls.load_dict(yaml.safe_load(path.read_text()))
+
+    @classmethod
+    def load_dict(cls, data: dict[str, Any]) -> "Config":
+        adapters = {
+            name: AdapterConfig(name=name, **spec)
+            for name, spec in (data.get("adapters") or {}).items()
+        }
+        rules = [PolicyRule(**r) for r in data.get("rules") or []]
+        relay = data.get("relay") or {}
+        for spec in adapters.values():
+            if spec.mode == "interactive_tmux":
+                spec.mode = "interactive"
+            if not spec.label:
+                spec.label = spec.name.replace("-", " ").title()
+        return cls(
+            node_name=data.get("node_name") or socket.gethostname().split(".")[0],
+            port=int(data.get("port") or DEFAULT_PORT),
+            token=data["token"],
+            adapters=adapters,
+            rules=rules,
+            default_action=data.get("default_action", "approve"),
+            default_agent=data.get("default_agent"),
+            approve_timeout=int(data.get("approve_timeout") or 300),
+            use_tmux=bool(data.get("use_tmux", False)),
+            wait_before_send_seconds=int(
+                relay.get("wait_before_send_seconds") or 5),
+            trusted_peers=list(data.get("trusted_peers") or []),
+        )
+
+    def agent_labels(self) -> list[dict[str, str]]:
+        out = []
+        for name, spec in self.adapters.items():
+            mode = "visible" if spec.mode in INTERACTIVE_MODES else "background"
+            out.append({
+                "id": name,
+                "label": spec.label or name,
+                "mode": mode,
+            })
+        return out
+
+
+# ============================================================
+# Policy engine
+# ============================================================
+
+def decide(cfg: Config, command: str,
+           hint: str | None) -> tuple[str, str | None]:
+    """Return (action, agent_name) for the given command."""
+    first_match: PolicyRule | None = None
+    guard_match: PolicyRule | None = None
+    for rule in cfg.rules:
+        if re.search(rule.pattern, command):
+            if first_match is None:
+                first_match = rule
+            if rule.action in ("approve", "reject"):
+                guard_match = rule
+                break
+
+    # Caller hints may raise scrutiny, but cannot downgrade a policy rule that
+    # requires approval or rejection, even if an older config puts broad rules
+    # before dangerous-command rules.
+    if guard_match:
+        if hint == "reject":
+            return "reject", None
+        return guard_match.action, guard_match.agent or cfg.default_agent
+
+    if hint in ("approve", "reject"):
+        return hint, None
+    if hint == "agent":
+        return hint, cfg.default_agent
+    if hint == "auto":
+        if first_match and first_match.action != "auto":
+            return first_match.action, first_match.agent or cfg.default_agent
+        return hint, None
+
+    if first_match:
+        return first_match.action, first_match.agent or cfg.default_agent
+    return cfg.default_action, cfg.default_agent
+
+
+# ============================================================
+# Notifications & approvals (cross-platform, best-effort)
+# ============================================================
+
+def notify(title: str, body: str) -> None:
+    """Best-effort native notification (macOS / Linux / Windows)."""
+    sysname = platform.system()
+    body_clean = body.replace('"', "'")
+    title_clean = title.replace('"', "'")
+    try:
+        if sysname == "Darwin":
+            subprocess.run(
+                ["osascript", "-e",
+                 f'display notification "{body_clean}" with title "{title_clean}"'],
+                check=False, timeout=5,
+            )
+        elif sysname == "Linux":
+            if shutil.which("notify-send"):
+                subprocess.run(["notify-send", title, body],
+                               check=False, timeout=5)
+        elif sysname == "Windows":
+            ps = (
+                "[Windows.UI.Notifications.ToastNotificationManager,"
+                "Windows.UI.Notifications,ContentType=WindowsRuntime] | Out-Null;"
+                f'Write-Host "{title_clean}: {body_clean}"'
+            )
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           check=False, timeout=5)
+    except Exception as e:
+        log.warning("notify failed: %s", e)
+
+
+def approve_dialog(cfg: Config, sender: str, command: str) -> bool:
+    """Blocking approve/reject dialog. Returns True if user approves."""
+    sysname = platform.system()
+    timeout = cfg.approve_timeout
+    prompt = f"Run command from {sender}?\n\n{command}"
+    safe_prompt = prompt.replace('"', "'")
+    try:
+        if sysname == "Darwin":
+            script = (
+                f'display dialog "{safe_prompt}" '
+                f'buttons {{"Reject", "Approve"}} default button "Approve" '
+                f'with title "agentrelay" giving up after {timeout}'
+            )
+            r = subprocess.run(["osascript", "-e", script],
+                               capture_output=True, text=True,
+                               timeout=timeout + 5)
+            return "Approve" in (r.stdout or "")
+        elif sysname == "Linux":
+            if shutil.which("zenity"):
+                r = subprocess.run(
+                    ["zenity", "--question",
+                     f"--title=agentrelay from {sender}",
+                     f"--text={prompt}",
+                     f"--timeout={timeout}"],
+                    check=False, timeout=timeout + 5,
+                )
+                return r.returncode == 0
+            if shutil.which("kdialog"):
+                r = subprocess.run(
+                    ["kdialog", "--title", f"agentrelay from {sender}",
+                     "--yesno", prompt],
+                    check=False, timeout=timeout + 5,
+                )
+                return r.returncode == 0
+            log.warning("no zenity/kdialog available; auto-rejecting")
+            return False
+        elif sysname == "Windows":
+            ps = (
+                "Add-Type -AssemblyName PresentationFramework;"
+                f'$r=[System.Windows.MessageBox]::Show("{safe_prompt}",'
+                '"agentrelay",4);'
+                'if ($r -eq "Yes") {exit 0} else {exit 1}'
+            )
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               check=False, timeout=timeout + 5)
+            return r.returncode == 0
+    except Exception as e:
+        log.warning("approve dialog failed: %s", e)
+    return False
+
+
+# ============================================================
+# Execution
+# ============================================================
+
+async def run_subprocess(cmd: list[str] | str, timeout: int,
+                         shell: bool = False) -> dict[str, Any]:
+    """Run a subprocess and capture stdout/stderr."""
+    log.info("exec: %s", cmd)
+    if shell:
+        proc = await asyncio.create_subprocess_shell(
+            cmd if isinstance(cmd, str) else " ".join(cmd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return {"status": "timeout", "exit_code": -1,
+                "stdout": "", "stderr": f"timeout after {timeout}s"}
+    return {
+        "status": "ok" if proc.returncode == 0 else "error",
+        "exit_code": proc.returncode,
+        "stdout": (out or b"").decode(errors="replace"),
+        "stderr": (err or b"").decode(errors="replace"),
+    }
+
+
+def render_adapter(adapter: AdapterConfig, prompt: str) -> list[str]:
+    return [part.replace("{prompt}", prompt) for part in adapter.command]
+
+
+async def spawn_agent(cfg: Config, adapter: AdapterConfig,
+                      prompt: str) -> dict[str, Any]:
+    if adapter.mode in INTERACTIVE_MODES:
+        return await _spawn_interactive_visible(
+            adapter, prompt, cfg.wait_before_send_seconds)
+    cmd = render_adapter(adapter, prompt)
+    if cfg.use_tmux and shutil.which("tmux"):
+        session = f"agentrelay-{uuid.uuid4().hex[:6]}"
+        tmux_cmd = ["tmux", "new-session", "-d", "-s", session,
+                    " ".join(shlex.quote(c) for c in cmd)]
+        await run_subprocess(tmux_cmd, timeout=10)
+        return {"status": "spawned",
+                "exit_code": 0,
+                "stdout": (
+                    f"spawned in tmux session '{session}'.\n"
+                    f"attach with: tmux attach -t {session}"),
+                "stderr": ""}
+    return await run_subprocess(cmd, timeout=adapter.timeout)
+
+
+async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
+                                     wait_seconds: int) -> dict[str, Any]:
+    """Type the prompt into the active agent window, wait, then press Enter."""
+    if shutil.which("tmux"):
+        session = adapter.session or f"agentrelay-{adapter.name}"
+        check = await run_subprocess(
+            ["tmux", "has-session", "-t", session], timeout=5)
+        if check["exit_code"] == 0:
+            send = await run_subprocess(
+                ["tmux", "send-keys", "-t", session, prompt], timeout=10)
+            if send["exit_code"] != 0:
+                return {"status": "error", "exit_code": send["exit_code"],
+                        "stdout": "", "stderr": send["stderr"]}
+            await asyncio.sleep(max(1, wait_seconds))
+            enter = await run_subprocess(
+                ["tmux", "send-keys", "-t", session, "", "Enter"], timeout=10)
+            if enter["exit_code"] != 0:
+                return {"status": "error", "exit_code": enter["exit_code"],
+                        "stdout": "", "stderr": enter["stderr"]}
+            return {
+                "status": "sent", "exit_code": 0,
+                "stdout": (
+                    f"Typed into tmux session '{session}', "
+                    f"sent after {wait_seconds}s."),
+                "stderr": "",
+            }
+
+    # No tmux — use pyautogui, targeting by window title if specified
+    try:
+        import pyautogui
+        loop = asyncio.get_running_loop()
+
+        # Derive a window title fragment: explicit config > first word of command
+        title_hint = (adapter.window_title or
+                      (adapter.command[0] if adapter.command else "")).lower()
+
+        def _focus_and_type():
+            import time
+            focused_on = "active window"
+            if title_hint:
+                if platform.system() == "Windows":
+                    try:
+                        import pygetwindow as gw
+                        matches = [w for w in gw.getAllWindows()
+                                   if title_hint in w.title.lower()]
+                        if matches:
+                            matches[0].activate()
+                            time.sleep(0.4)
+                            focused_on = matches[0].title
+                    except Exception:
+                        pass
+                elif platform.system() == "Darwin":
+                    try:
+                        script = (
+                            f'tell application "System Events" to set frontmost of '
+                            f'(first process whose name contains "{title_hint}") to true'
+                        )
+                        subprocess.run(["osascript", "-e", script],
+                                       check=False, timeout=3)
+                        time.sleep(0.4)
+                        focused_on = title_hint
+                    except Exception:
+                        pass
+            time.sleep(0.2)
+            pyautogui.write(prompt, interval=0.02)
+            return focused_on
+
+        focused_on = await loop.run_in_executor(None, _focus_and_type)
+        await asyncio.sleep(max(1, wait_seconds))
+        await loop.run_in_executor(None, pyautogui.press, "enter")
+        return {
+            "status": "sent", "exit_code": 0,
+            "stdout": f"Typed into '{focused_on}', Enter pressed after {wait_seconds}s.",
+            "stderr": "",
+        }
+    except Exception as e:
+        return {
+            "status": "error", "exit_code": 1, "stdout": "",
+            "stderr": f"pyautogui fallback failed: {e}",
+        }
+
+
+async def auto_execute(command: str) -> dict[str, Any]:
+    """Execute a small allowlist without invoking a shell."""
+    try:
+        argv = shlex.split(command)
+    except ValueError as e:
+        return {"status": "rejected", "exit_code": 1, "stdout": "",
+                "stderr": f"invalid command syntax: {e}"}
+
+    if not argv or argv[0] not in AUTO_ALLOWLIST:
+        return {"status": "rejected", "exit_code": 1, "stdout": "",
+                "stderr": f"auto command not allowed: {argv[0] if argv else ''}"}
+
+    return await run_subprocess(argv, timeout=600)
+
+
+# ============================================================
+# Peer registry
+# ============================================================
+
+@dataclass
+class Peer:
+    name: str
+    address: str
+    port: int
+    agents: str = ""
+    last_seen: float = field(default_factory=time.time)
+
+
+class PeerRegistry:
+    def __init__(self) -> None:
+        self.peers: dict[str, Peer] = {}
+
+    def upsert(self, name: str, addr: str, port: int,
+               agents: str = "") -> None:
+        self.peers[name] = Peer(
+            name=name, address=addr, port=port, agents=agents)
+        log.info("peer up: %s @ %s:%d", name, addr, port)
+
+    def remove(self, name: str) -> None:
+        if name in self.peers:
+            log.info("peer down: %s", name)
+            del self.peers[name]
+
+    def list(self, trusted: list[str] | None = None) -> list[dict[str, Any]]:
+        trusted = trusted or []
+        return [
+            {
+                "name": p.name,
+                "address": p.address,
+                "port": p.port,
+                "agents": p.agents,
+                "connected": p.name in trusted,
+                "last_seen": p.last_seen,
+            }
+            for p in self.peers.values()
+        ]
+
+
+# ============================================================
+# Main daemon
+# ============================================================
+
+class AgentRelay:
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.peers = PeerRegistry()
+        self.talk = ConversationStore()
+        self.pairing = PairingManager()
+        self.azc: AsyncZeroconf | None = None
+        self.browser: AsyncServiceBrowser | None = None
+        self.service_info: ServiceInfo | None = None
+
+    async def register_mdns(self) -> None:
+        self.azc = AsyncZeroconf(ip_version=IPVersion.V4Only)
+        addresses = [socket.inet_aton(self._local_ip())]
+        agent_ids = ",".join(self.cfg.adapters.keys())
+        self.service_info = ServiceInfo(
+            type_=SERVICE_TYPE,
+            name=f"{self.cfg.node_name}.{SERVICE_TYPE}",
+            addresses=addresses,
+            port=self.cfg.port,
+            properties={
+                "node": self.cfg.node_name,
+                "version": "0.2.0",
+                "agents": agent_ids,
+            },
+            server=f"{self.cfg.node_name}.local.",
+        )
+        await self.azc.async_register_service(self.service_info)
+        log.info("mDNS registered: %s on port %d",
+                 self.cfg.node_name, self.cfg.port)
+        self.browser = AsyncServiceBrowser(
+            self.azc.zeroconf, [SERVICE_TYPE],
+            handlers=[self._on_service_state_change],
+        )
+
+    def _local_ip(self) -> str:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+        except Exception:
+            return "127.0.0.1"
+        finally:
+            s.close()
+
+    def _on_service_state_change(self, zc=None, service_type=None, name=None,
+                                  state_change=None, **kwargs) -> None:
+        name = name or kwargs.get("name")
+        state_change = state_change or kwargs.get("state_change")
+        if not name or state_change is None:
+            return
+        asyncio.ensure_future(self._resolve_peer(name, state_change))
+
+    async def _resolve_peer(self, name: str,
+                            state_change: ServiceStateChange) -> None:
+        if state_change == ServiceStateChange.Removed:
+            self.peers.remove(name.split(".")[0])
+            return
+        info = AsyncServiceInfo(SERVICE_TYPE, name)
+        if not await info.async_request(self.azc.zeroconf, 3000):
+            return
+        node = info.properties.get(b"node", b"").decode() or name.split(".")[0]
+        if node == self.cfg.node_name:
+            return  # ourselves
+        addrs = info.parsed_scoped_addresses()
+        agents = info.properties.get(b"agents", b"").decode()
+        if addrs:
+            self.peers.upsert(node, addrs[0], info.port, agents=agents)
+
+    async def shutdown(self) -> None:
+        log.info("shutting down")
+        if self.browser:
+            await self.browser.async_cancel()
+        if self.azc and self.service_info:
+            await self.azc.async_unregister_service(self.service_info)
+            await self.azc.async_close()
+
+    # ---- HTTP handlers ----
+
+    def _auth(self, request: web.Request) -> bool:
+        return secrets.compare_digest(
+            request.headers.get("X-Agent-Token", ""), self.cfg.token)
+
+    async def handle_health(self, request: web.Request) -> web.Response:
+        return web.json_response({"ok": True, "node": self.cfg.node_name})
+
+    async def handle_info(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({
+            "node": self.cfg.node_name,
+            "port": self.cfg.port,
+            "adapters": list(self.cfg.adapters.keys()),
+            "rules": [r.__dict__ for r in self.cfg.rules],
+        })
+
+    async def handle_peers(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({
+            "peers": self.peers.list(self.cfg.trusted_peers),
+        })
+
+    async def handle_setup(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({
+            "node": self.cfg.node_name,
+            "address": self._local_ip(),
+            "port": self.cfg.port,
+            "agents": self.cfg.agent_labels(),
+            "wait_before_send_seconds": self.cfg.wait_before_send_seconds,
+            "trusted_peers": self.cfg.trusted_peers,
+            "nearby": self.peers.list(self.cfg.trusted_peers),
+        })
+
+    async def handle_forward(self, request: web.Request) -> web.Response:
+        """Forward a request so it appears in the other computer's agent window."""
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        from_node = body.get("from_node", "unknown")
+        from_agent = body.get("from_agent", "")
+        to_agent = body.get("to_agent") or self.cfg.default_agent
+        message = (body.get("message") or "").strip()
+
+        if not message:
+            return web.json_response({"error": "missing message"}, status=400)
+        if not to_agent or to_agent not in self.cfg.adapters:
+            return web.json_response(
+                {"error": f"unknown agent: {to_agent}"}, status=400)
+
+        adapter = self.cfg.adapters[to_agent]
+        if adapter.mode not in INTERACTIVE_MODES:
+            talk_cfg = dataclasses.replace(self.cfg, use_tmux=False)
+            result = await spawn_agent(talk_cfg, adapter, message)
+        else:
+            header = (
+                f"[Forwarded from {from_agent} on {from_node}]\n\n"
+                if from_agent else ""
+            )
+            result = await spawn_agent(
+                self.cfg, adapter, header + message)
+
+        notify("AgentRelay",
+               f"Request from {from_node}: {message[:50]}")
+        ok = result.get("exit_code", 1) == 0
+        return web.json_response({
+            "ok": ok,
+            "node": self.cfg.node_name,
+            "agent": to_agent,
+            **result,
+        })
+
+    async def handle_pair_request(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        from_node = body.get("from_node", "").strip()
+        if not from_node:
+            return web.json_response({"error": "from_node required"}, status=400)
+        addr = request.remote or "unknown"
+        req = self.pairing.request(from_node, addr)
+        notify("AgentRelay", f"{from_node} wants to connect")
+        return web.json_response({"request_id": req.id, "status": "pending"})
+
+    async def handle_pair_pending(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"pending": self.pairing.list_pending()})
+
+    async def handle_pair_approve(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        rid = body.get("request_id", "")
+        if not self.pairing.approve(rid, self.cfg.token, self.cfg.node_name):
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    async def handle_pair_reject(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        self.pairing.reject(body.get("request_id", ""))
+        return web.json_response({"ok": True})
+
+    async def handle_pair_poll(self, request: web.Request) -> web.Response:
+        from_node = request.query.get("from_node", "")
+        if not from_node:
+            return web.json_response({"error": "from_node required"}, status=400)
+        result = self.pairing.poll(from_node)
+        if not result:
+            return web.json_response({"status": "pending"})
+        return web.json_response({
+            "status": "connected",
+            "token": result["token"],
+            "node_name": result["node_name"],
+        })
+
+    async def handle_dispatch(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        command = body.get("command")
+        sender = body.get("from", "unknown")
+        agent_hint = body.get("agent")
+        policy_hint = body.get("policy_hint")
+        request_id = body.get("request_id") or uuid.uuid4().hex
+
+        if not command:
+            return web.json_response({"error": "missing command"}, status=400)
+
+        # If caller named an agent but didn't give an explicit policy,
+        # treat as "agent" action.
+        if agent_hint and policy_hint is None:
+            policy_hint = "agent"
+
+        action, agent_name = decide(self.cfg, command, policy_hint)
+        if action == "agent" and agent_hint:
+            agent_name = agent_hint
+
+        log.info("[%s] from=%s action=%s agent=%s cmd=%r",
+                 request_id, sender, action, agent_name, command)
+        notify("agentrelay", f"{action} from {sender}: {command[:80]}")
+
+        result: dict[str, Any]
+        if action == "reject":
+            result = {"status": "rejected", "exit_code": 1,
+                      "stdout": "", "stderr": "policy: reject"}
+        elif action == "auto":
+            result = await auto_execute(command)
+        elif action == "agent":
+            if not agent_name or agent_name not in self.cfg.adapters:
+                result = {"status": "error", "exit_code": 1,
+                          "stdout": "",
+                          "stderr": f"unknown agent: {agent_name}"}
+            else:
+                result = await spawn_agent(
+                    self.cfg, self.cfg.adapters[agent_name], command)
+        elif action == "approve":
+            loop = asyncio.get_running_loop()
+            approved = await loop.run_in_executor(
+                None, approve_dialog, self.cfg, sender, command)
+            if not approved:
+                result = {"status": "rejected", "exit_code": 1,
+                          "stdout": "", "stderr": "user rejected"}
+            elif agent_name and agent_name in self.cfg.adapters:
+                result = await spawn_agent(
+                    self.cfg, self.cfg.adapters[agent_name], command)
+            else:
+                result = await auto_execute(command)
+        else:
+            result = {"status": "error", "exit_code": 1,
+                      "stdout": "", "stderr": f"unknown action: {action}"}
+
+        return web.json_response({
+            "request_id": request_id,
+            "node": self.cfg.node_name,
+            "action": action,
+            "agent": agent_name,
+            **result,
+        })
+
+    async def handle_talk(self, request: web.Request) -> web.Response:
+        """Agent-to-agent message: run local agent with thread context, return reply."""
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        from_node = body.get("from_node")
+        from_agent = body.get("from_agent")
+        to_agent = body.get("to_agent") or self.cfg.default_agent
+        message = (body.get("message") or "").strip()
+        thread_id = body.get("thread_id")
+
+        if not from_node or not from_agent:
+            return web.json_response(
+                {"error": "from_node and from_agent required"}, status=400)
+        if not message:
+            return web.json_response({"error": "missing message"}, status=400)
+        if not to_agent or to_agent not in self.cfg.adapters:
+            return web.json_response(
+                {"error": f"unknown agent: {to_agent}"}, status=400)
+
+        local_node = self.cfg.node_name
+        log.info("talk from %s@%s -> %s thread=%s: %r",
+                 from_agent, from_node, to_agent, thread_id, message[:80])
+        notify("agentrelay talk",
+               f"{from_agent}@{from_node} → {to_agent}: {message[:60]}")
+
+        pre_messages = self.talk.get_messages(thread_id) if thread_id else []
+        user_msg = self.talk.append(
+            thread_id,
+            local_node=local_node,
+            peer_node=from_node,
+            local_agent=to_agent,
+            remote_agent=from_agent,
+            remote_node=from_node,
+            from_node=from_node,
+            from_agent=from_agent,
+            to_node=local_node,
+            to_agent=to_agent,
+            role="user",
+            content=message,
+        )
+        tid = user_msg.thread_id
+
+        prompt = self.talk.format_prompt(
+            tid,
+            local_node=local_node,
+            from_node=from_node,
+            from_agent=from_agent,
+            new_message=message,
+            _messages=pre_messages,
+        )
+
+        talk_cfg = dataclasses.replace(self.cfg, use_tmux=False)
+        result = await spawn_agent(
+            talk_cfg, self.cfg.adapters[to_agent], prompt)
+
+        reply_content = (result.get("stdout") or "").strip()
+        if not reply_content:
+            reply_content = (result.get("stderr") or "").strip()
+
+        assistant_msg = self.talk.append(
+            tid,
+            local_node=local_node,
+            peer_node=from_node,
+            local_agent=to_agent,
+            remote_agent=from_agent,
+            remote_node=from_node,
+            from_node=local_node,
+            from_agent=to_agent,
+            to_node=from_node,
+            to_agent=from_agent,
+            role="assistant",
+            content=reply_content,
+        )
+
+        ok = result.get("exit_code", 1) == 0
+        return web.json_response({
+            "ok": ok,
+            "thread_id": tid,
+            "message_id": user_msg.id,
+            "reply": {
+                "id": assistant_msg.id,
+                "from_node": local_node,
+                "from_agent": to_agent,
+                "to_node": from_node,
+                "to_agent": from_agent,
+                "content": reply_content,
+            },
+            "exit_code": result.get("exit_code"),
+            "status": result.get("status"),
+        })
+
+    async def handle_talk_threads(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"threads": self.talk.list_threads()})
+
+    async def handle_talk_thread(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        thread_id = request.match_info.get("thread_id", "")
+        messages = [m.to_dict() for m in self.talk.get_messages(thread_id)]
+        if not messages:
+            return web.json_response({"error": "thread not found"}, status=404)
+        return web.json_response({"thread_id": thread_id, "messages": messages})
+
+    def build_app(self) -> web.Application:
+        app = web.Application(client_max_size=1024 * 1024)
+        app.router.add_get("/health", self.handle_health)
+        app.router.add_get("/info", self.handle_info)
+        app.router.add_get("/peers", self.handle_peers)
+        app.router.add_post("/dispatch", self.handle_dispatch)
+        app.router.add_get("/setup", self.handle_setup)
+        app.router.add_post("/forward", self.handle_forward)
+        app.router.add_post("/talk", self.handle_talk)
+        app.router.add_get("/talk/threads", self.handle_talk_threads)
+        app.router.add_get("/talk/threads/{thread_id}", self.handle_talk_thread)
+        app.router.add_post("/pair/request", self.handle_pair_request)
+        app.router.add_get("/pair/pending", self.handle_pair_pending)
+        app.router.add_post("/pair/approve", self.handle_pair_approve)
+        app.router.add_post("/pair/reject", self.handle_pair_reject)
+        app.router.add_get("/pair/poll", self.handle_pair_poll)
+        return app
+
+
+# ============================================================
+# Init / entry point
+# ============================================================
+
+DEFAULT_CONFIG_YAML = """\
+# agentrelay configuration
+
+# Display name for this machine on the agent mesh.
+node_name: __NODE__
+
+# Port for the local HTTP listener.
+port: 9876
+
+# Shared secret. MUST be identical on every machine that should
+# trust each other. Copy this exact string to every other node.
+token: __TOKEN__
+
+use_tmux: false
+
+approve_timeout: 300
+
+relay:
+  wait_before_send_seconds: 5
+
+trusted_peers: []
+
+# Default action when no rule matches and no hint is given.
+# One of: auto | agent | approve | reject
+default_action: approve
+default_agent: claude
+
+# Adapters: how to invoke each local AI agent CLI in headless
+# mode. The literal {prompt} is replaced with the request text.
+# Adjust the command list to match your installed CLI version.
+adapters:
+  claude:
+    command: ["claude", "-p", "{prompt}"]
+    timeout: 1800
+  codex:
+    command: ["codex", "exec", "--skip-git-repo-check", "{prompt}"]
+    timeout: 1800
+  codex-visible:
+    label: Codex (visible window)
+    mode: interactive
+    session: agentrelay-codex
+    command: ["codex"]
+    timeout: 1800
+  gemini:
+    command: ["gemini", "-p", "{prompt}"]
+    timeout: 1800
+
+# Policy rules, checked in order. First match wins.
+# `pattern` is a Python regex matched against the command string.
+rules:
+  # Anything dangerous: always ask. Keep this before broader tool rules.
+  - pattern: '\\b(sudo|rm\\s+-rf|/etc/|\\.ssh|systemctl|launchctl|shutdown|reboot)\\b'
+    action: approve
+    agent: claude
+
+  # Safe read-only inspection: auto-execute.
+  - pattern: '^(uname|hostname|whoami|pwd|ls|df|free|uptime|date|id)(\\s|$)'
+    action: auto
+
+  # Package installs and routine dev ops: hand to the local Claude.
+  - pattern: '\\b(apt|brew|npm|pip|pipx|cargo|docker|git)\\b'
+    action: agent
+    agent: claude
+"""
+
+
+def write_default_config(path: Path) -> None:
+    if path.exists():
+        log.warning("config exists, not overwriting: %s", path)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    node = socket.gethostname().split(".")[0]
+    token = secrets.token_urlsafe(32)
+    content = (DEFAULT_CONFIG_YAML
+               .replace("__NODE__", node)
+               .replace("__TOKEN__", token))
+    path.write_text(content)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    print(f"wrote config: {path}")
+    print(f"node_name:   {node}")
+    print(f"token:       {token}")
+    print()
+    print("Open AgentRelay on your other computers and tap Connect,")
+    print("or copy the security code from Advanced settings.")
+
+
+async def amain(cfg: Config) -> None:
+    relay = AgentRelay(cfg)
+    await relay.register_mdns()
+    app = relay.build_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", cfg.port)
+    await site.start()
+    log.info("listening on 0.0.0.0:%d as %s", cfg.port, cfg.node_name)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for s in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(s, stop.set)
+        except NotImplementedError:
+            pass  # Windows
+
+    try:
+        await stop.wait()
+    finally:
+        await runner.cleanup()
+        await relay.shutdown()
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(prog="agentrelay")
+    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    p.add_argument("--init", action="store_true",
+                   help="write default config + fresh token, then exit")
+    p.add_argument("-v", "--verbose", action="store_true")
+    args = p.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    if args.init:
+        write_default_config(args.config)
+        return
+
+    if not args.config.exists():
+        log.error("no config at %s. run: agentrelay --init", args.config)
+        sys.exit(1)
+
+    cfg = Config.load(args.config)
+    if "CHANGE_ME" in cfg.token or len(cfg.token) < 16:
+        log.error("weak or placeholder token in %s. edit it first.", args.config)
+        sys.exit(1)
+
+    try:
+        asyncio.run(amain(cfg))
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

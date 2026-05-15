@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""
+agent-forward - send a request to another computer's agent.
+
+The request appears in that computer's agent window so you can read and
+edit it before it is sent (waits a few seconds, then continues automatically).
+
+Example:
+    agent-forward mac "install Xcode command line tools"
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+import aiohttp
+import yaml
+from zeroconf import IPVersion, ServiceStateChange
+from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
+
+SERVICE_TYPE = "_agentrelay._tcp.local."
+DEFAULT_CONFIG = Path.home() / ".config" / "agentrelay" / "config.yaml"
+
+
+def load_config(path: Path) -> dict:
+    if not path.exists():
+        print(f"No settings found at {path}", file=sys.stderr)
+        sys.exit(1)
+    return yaml.safe_load(path.read_text())
+
+
+async def discover(timeout: float = 3.0) -> dict[str, tuple[str, int]]:
+    azc = AsyncZeroconf(ip_version=IPVersion.V4Only)
+    results: dict[str, tuple[str, int]] = {}
+
+    async def resolve(name: str) -> None:
+        info = AsyncServiceInfo(SERVICE_TYPE, name)
+        if await info.async_request(azc.zeroconf, 2000):
+            node = info.properties.get(b"node", b"").decode() or name.split(".")[0]
+            addrs = info.parsed_scoped_addresses()
+            if addrs:
+                results[node] = (addrs[0], info.port)
+
+    def handler(zc=None, service_type=None, name=None, state_change=None, **kw):
+        name = name or kw.get("name")
+        sc = state_change or kw.get("state_change")
+        if sc == ServiceStateChange.Added and name:
+            asyncio.ensure_future(resolve(name))
+
+    browser = AsyncServiceBrowser(azc.zeroconf, [SERVICE_TYPE], handlers=[handler])
+    await asyncio.sleep(timeout)
+    await browser.async_cancel()
+    await azc.async_close()
+    return results
+
+
+async def forward(cfg: dict, computer: str, message: str,
+                  agent: str | None) -> int:
+    token = cfg["token"]
+    from_node = cfg.get("node_name", "local")
+    from_agent = cfg.get("default_agent", "claude")
+    to_agent = agent or cfg.get("default_agent", "claude")
+
+    peers = await discover()
+    if computer not in peers:
+        print(f"Computer not found: {computer}", file=sys.stderr)
+        if peers:
+            print("Nearby:", ", ".join(sorted(peers)), file=sys.stderr)
+        return 1
+
+    addr, port = peers[computer]
+    payload = {
+        "from_node": from_node,
+        "from_agent": from_agent,
+        "to_agent": to_agent,
+        "message": message,
+    }
+    url = f"http://{addr}:{port}/forward"
+    timeout = aiohttp.ClientTimeout(total=120, sock_connect=5)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        async with s.post(url, json=payload,
+                          headers={"X-Agent-Token": token}) as r:
+            data = await r.json()
+
+    print(json.dumps(data, indent=2))
+    if data.get("stdout"):
+        print("\n", data["stdout"])
+    return 0 if data.get("ok") else 1
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Forward a request to another computer.")
+    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    p.add_argument("computer", help="name of the other computer")
+    p.add_argument("message", help="what the other agent should do")
+    p.add_argument("--agent", help="which agent on that computer (default: visible Codex)")
+    args = p.parse_args()
+    cfg = load_config(args.config)
+    sys.exit(asyncio.run(forward(cfg, args.computer, args.message, args.agent)))
+
+
+if __name__ == "__main__":
+    main()

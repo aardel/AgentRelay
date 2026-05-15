@@ -1,0 +1,15 @@
+[Unit]
+Description=agentrelay - peer-to-peer AI agent command relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/agentrelay
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.local/state/agentrelay.log
+StandardError=append:%h/.local/state/agentrelay.err.log
+
+[Install]
+WantedBy=default.target

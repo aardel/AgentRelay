@@ -1,0 +1,12 @@
+.venv*/
+.python/
+config.yaml
+__pycache__/
+*.pyc
+.install-test*/
+agentrelay.zip
+python-*.exe
+python-install*.log
+*.egg-info/
+.DS_Store
+.claude/

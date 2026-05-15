@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentRelay</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>AgentRelay</h1>
+    <p class="subtitle">Connect your computers so agents can work together</p>
+    <div class="header-bar">
+      <span id="status-badge" class="badge off">Stopped</span>
+      <button type="button" id="btn-relay" class="btn primary">Start</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>This computer</h2>
+      <label>Name <input id="node-name" type="text"></label>
+      <p class="hint" id="this-address"></p>
+      <h3>Agents on this computer</h3>
+      <ul id="local-agents" class="agent-list"></ul>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <h2>Nearby computers</h2>
+        <button type="button" id="btn-refresh" class="btn ghost">Refresh</button>
+      </div>
+      <ul id="nearby-list" class="nearby-list">
+        <li class="empty">Start AgentRelay to look for other computers</li>
+      </ul>
+    </section>
+
+    <section class="card" id="pending-card" hidden>
+      <h2>Connection requests</h2>
+      <ul id="pending-list"></ul>
+    </section>
+
+    <section class="card">
+      <h2>Settings</h2>
+      <label>Seconds to wait before sending (so you can edit the text)
+        <input id="wait-seconds" type="number" min="1" max="60" value="5">
+      </label>
+      <button type="button" id="btn-save" class="btn">Save settings</button>
+    </section>
+
+    <section class="card">
+      <h2>Instructions for your agent</h2>
+      <p class="hint">Copy this into Codex, Cursor, or Claude so it knows how to forward work.</p>
+      <pre id="agent-snippet" class="snippet"></pre>
+      <button type="button" id="btn-copy" class="btn">Copy</button>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

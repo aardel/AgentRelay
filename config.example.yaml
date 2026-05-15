@@ -1,0 +1,43 @@
+node_name: my-computer
+port: 9876
+token: GENERATE_WITH_agentrelay_--init
+
+use_tmux: false
+approve_timeout: 300
+default_action: approve
+default_agent: claude
+
+relay:
+  wait_before_send_seconds: 5
+
+trusted_peers: []
+
+adapters:
+  claude:
+    label: Claude
+    command: ["claude", "-p", "{prompt}"]
+    timeout: 1800
+  codex:
+    label: Codex
+    command: ["codex", "exec", "--skip-git-repo-check", "{prompt}"]
+    timeout: 1800
+  codex-visible:
+    label: Codex (visible window)
+    mode: interactive
+    session: agentrelay-codex
+    command: ["codex"]
+    timeout: 1800
+  gemini:
+    label: Gemini
+    command: ["gemini", "-p", "{prompt}"]
+    timeout: 1800
+
+rules:
+  - pattern: '\b(sudo|rm\s+-rf|/etc/|\.ssh|systemctl|launchctl|shutdown|reboot)\b'
+    action: approve
+    agent: claude
+  - pattern: '^(uname|hostname|whoami|pwd|ls|df|free|uptime|date|id)(\s|$)'
+    action: auto
+  - pattern: '\b(apt|brew|npm|pip|pipx|cargo|docker|git)\b'
+    action: agent
+    agent: claude

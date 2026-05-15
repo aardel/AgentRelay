@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""
+agent-talk - agent-to-agent conversation across AgentRelay peers.
+
+Examples:
+    agent-talk --threads
+    agent-talk test-bench --to-agent codex "run pytest and summarize failures"
+    agent-talk test-bench --to-agent codex --from-agent claude --thread abc123 "any updates?"
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+import aiohttp
+import yaml
+from talk import ConversationStore, mirror_remote_turn
+from zeroconf import IPVersion
+from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
+
+SERVICE_TYPE = "_agentrelay._tcp.local."
+DEFAULT_CONFIG = Path.home() / ".config" / "agentrelay" / "config.yaml"
+
+
+def load_config(path: Path) -> dict:
+    if not path.exists():
+        print(f"no config at {path}\nrun: agentrelay --init", file=sys.stderr)
+        sys.exit(1)
+    return yaml.safe_load(path.read_text())
+
+
+async def _resolve(azc: AsyncZeroconf, name: str, results: dict) -> None:
+    info = AsyncServiceInfo(SERVICE_TYPE, name)
+    if not await info.async_request(azc.zeroconf, 2000):
+        return
+    node = info.properties.get(b"node", b"").decode() or name.split(".")[0]
+    addrs = info.parsed_scoped_addresses()
+    if addrs:
+        results[node] = (addrs[0], info.port)
+
+
+async def discover(timeout: float = 2.5) -> dict[str, tuple[str, int]]:
+    azc = AsyncZeroconf(ip_version=IPVersion.V4Only)
+    results: dict[str, tuple[str, int]] = {}
+
+    def handler(zc=None, service_type=None, name=None, state_change=None, **kwargs):
+        name = name or kwargs.get("name")
+        from zeroconf import ServiceStateChange
+        state_change = state_change or kwargs.get("state_change")
+        if state_change == ServiceStateChange.Added:
+            asyncio.ensure_future(_resolve(azc, name, results))
+
+    browser = AsyncServiceBrowser(azc.zeroconf, [SERVICE_TYPE], handlers=[handler])
+    await asyncio.sleep(timeout)
+    await browser.async_cancel()
+    await azc.async_close()
+    return results
+
+
+async def cmd_threads(cfg: dict, local: bool) -> int:
+    token = cfg["token"]
+    node = cfg.get("node_name", "local")
+    port = int(cfg.get("port") or 9876)
+
+    if local:
+        host, p = "127.0.0.1", port
+    else:
+        print("remote thread listing not yet supported; use local daemon", file=sys.stderr)
+        return 1
+
+    url = f"http://{host}:{p}/talk/threads"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers={"X-Agent-Token": token}) as resp:
+            data = await resp.json()
+    threads = data.get("threads") or []
+    if not threads:
+        print("no threads")
+        return 0
+    print(f"{'thread':<34}  {'peer':<16}  {'agents':<24}  updated")
+    print(f"{'-'*34}  {'-'*16}  {'-'*24}  -------")
+    for t in threads:
+        agents = f"{t.get('local_agent')} ↔ {t.get('remote_agent')}"
+        print(f"{t['id']:<34}  {t.get('peer_node','?'):<16}  {agents:<24}  {t.get('updated',0):.0f}")
+    return 0
+
+
+async def cmd_show(cfg: dict, thread_id: str) -> int:
+    token = cfg["token"]
+    port = int(cfg.get("port") or 9876)
+    url = f"http://127.0.0.1:{port}/talk/threads/{thread_id}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers={"X-Agent-Token": token}) as resp:
+            data = await resp.json()
+            if resp.status != 200:
+                print(json.dumps(data, indent=2), file=sys.stderr)
+                return 1
+    for m in data.get("messages") or []:
+        who = f"{m['from_agent']}@{m['from_node']}"
+        print(f"[{who}] {m['content']}\n")
+    return 0
+
+
+async def cmd_talk(
+    cfg: dict,
+    target: str,
+    message: str,
+    *,
+    from_agent: str | None,
+    to_agent: str | None,
+    thread_id: str | None,
+) -> int:
+    token = cfg["token"]
+    from_node = cfg.get("node_name") or "local"
+    from_agent = from_agent or cfg.get("default_agent") or "claude"
+    to_agent = to_agent or cfg.get("default_agent") or "claude"
+
+    peers = await discover()
+    if target not in peers:
+        print(f"peer not found: {target}", file=sys.stderr)
+        if peers:
+            print(f"available: {', '.join(sorted(peers))}", file=sys.stderr)
+        return 1
+
+    addr, port = peers[target]
+    payload = {
+        "thread_id": thread_id,
+        "from_node": from_node,
+        "from_agent": from_agent,
+        "to_agent": to_agent,
+        "message": message,
+    }
+    url = f"http://{addr}:{port}/talk"
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            url, json=payload, headers={"X-Agent-Token": token}
+        ) as resp:
+            data = await resp.json()
+            ok = resp.status == 200 and data.get("ok")
+
+    print(json.dumps(data, indent=2))
+    reply = data.get("reply") or {}
+    if ok and reply.get("content") is not None:
+        mirror_remote_turn(
+            ConversationStore(),
+            data.get("thread_id") or thread_id,
+            local_node=from_node,
+            peer_node=target,
+            local_agent=from_agent,
+            remote_agent=to_agent,
+            user_message=message,
+            assistant_reply=reply.get("content", ""),
+        )
+        print("\n--- reply ---")
+        print(reply["content"])
+    return 0 if ok else 1
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        prog="agent-talk",
+        description="Hold an agent-to-agent conversation across AgentRelay peers.",
+    )
+    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    p.add_argument("--threads", action="store_true", help="list conversation threads")
+    p.add_argument("--show", metavar="THREAD_ID", help="print thread messages")
+    p.add_argument("target", nargs="?", help="peer node name")
+    p.add_argument("message", nargs="?", help="message for the remote agent")
+    p.add_argument("--from-agent", help="your local agent identity in this thread")
+    p.add_argument("--to-agent", help="remote agent adapter to invoke")
+    p.add_argument("--thread", dest="thread_id", help="continue an existing thread")
+    args = p.parse_args()
+
+    cfg = load_config(args.config)
+
+    if args.threads:
+        sys.exit(asyncio.run(cmd_threads(cfg, local=True)))
+    if args.show:
+        sys.exit(asyncio.run(cmd_show(cfg, args.show)))
+    if not args.target or not args.message:
+        p.error("target and message required (or use --threads / --show)")
+
+    sys.exit(asyncio.run(cmd_talk(
+        cfg, args.target, args.message,
+        from_agent=args.from_agent,
+        to_agent=args.to_agent,
+        thread_id=args.thread_id,
+    )))
+
+
+if __name__ == "__main__":
+    main()
