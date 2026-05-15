@@ -18,10 +18,12 @@ from relay_client import (
     connect_peer,
     fetch_pending,
     fetch_setup,
+    install_all_skills,
     install_skill,
     is_skill_installed,
     launch_agent,
     relay_running,
+    remove_all_skills,
     remove_skill,
     skill_names,
     start_relay,
@@ -161,6 +163,13 @@ class AgentRelayApp(tk.Tk):
         ttk.Button(sk_btn_row, text="Install", command=self._install_selected_skill).pack(
             side=tk.RIGHT)
 
+        sk_all_row = ttk.Frame(sk)
+        sk_all_row.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(sk_all_row, text="Remove All", command=self._remove_all_skills).pack(
+            side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(sk_all_row, text="Install All", command=self._install_all_skills).pack(
+            side=tk.RIGHT)
+
         self.footer = tk.StringVar()
         ttk.Label(self, textvariable=self.footer, style="Sub.TLabel", padding=6).pack(fill=tk.X)
 
@@ -249,6 +258,18 @@ class AgentRelayApp(tk.Tk):
             return
         msg = remove_skill(name, target)
         self.footer.set(msg)
+        self._refresh_skill_status()
+
+    def _install_all_skills(self) -> None:
+        target = self.skill_target_var.get()
+        results = install_all_skills(ROOT, target)
+        self.footer.set(f"Installed {len(results)} skills for {target}")
+        self._refresh_skill_status()
+
+    def _remove_all_skills(self) -> None:
+        target = self.skill_target_var.get()
+        results = remove_all_skills(ROOT, target)
+        self.footer.set(f"Removed {len(results)} skills from {target}")
         self._refresh_skill_status()
 
     # ── Peers ─────────────────────────────────────────────────────────────────

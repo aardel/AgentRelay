@@ -19,14 +19,14 @@ from config_io import load_raw, save_raw, update_settings
 
 # ── Skills management ────────────────────────────────────────────────────────
 
-def claude_commands_dir() -> Path:
-    return Path.home() / ".claude" / "commands"
-
-
 SKILL_TARGETS: dict[str, Path] = {
-    "Claude": Path.home() / ".claude" / "commands",
-    "Cursor": Path.home() / ".cursor" / "commands",
+    "Claude Code": Path.home() / ".claude"  / "commands",
+    "Gemini":      Path.home() / ".gemini"  / "commands",
+    "Codex":       Path.home() / ".codex"   / "commands",
 }
+
+def claude_commands_dir() -> Path:
+    return SKILL_TARGETS["Claude Code"]
 
 
 def _skill_definitions(relay_root: Path) -> dict[str, tuple[str, str]]:
@@ -102,31 +102,26 @@ and suggest the matching `/relay-*` skill for each agent type.
 
 def skill_names(relay_root: Path) -> list[tuple[str, str]]:
     """Return [(name, label), ...] for all defined skills."""
-    return [(name, label) for name, (label, _) in _skill_definitions(relay_root).items()]
-
-
-def _target_dir(target: str) -> Path:
-    return SKILL_TARGETS.get(target, claude_commands_dir())
+    return [(n, lbl) for n, (lbl, _) in _skill_definitions(relay_root).items()]
 
 
 def is_skill_installed(name: str, target: str) -> bool:
-    return (_target_dir(target) / f"{name}.md").exists()
+    commands_dir = SKILL_TARGETS.get(target)
+    return bool(commands_dir and (commands_dir / f"{name}.md").exists())
 
 
-def list_skills(relay_root: Path, target: str = "Claude") -> list[dict[str, Any]]:
+def list_skills(relay_root: Path) -> list[dict[str, Any]]:
+    commands_dir = claude_commands_dir()
     definitions = _skill_definitions(relay_root)
-    result = []
-    for name, (label, _) in definitions.items():
-        result.append({
-            "name": name,
-            "label": label,
-            "installed": is_skill_installed(name, target),
-        })
-    return result
+    return [{"name": n, "label": lbl,
+             "installed": (commands_dir / f"{n}.md").exists()}
+            for n, (lbl, _) in definitions.items()]
 
 
-def install_skill(name: str, relay_root: Path, target: str = "Claude") -> str:
-    commands_dir = _target_dir(target)
+def install_skill(name: str, relay_root: Path, target: str = "Claude Code") -> str:
+    commands_dir = SKILL_TARGETS.get(target)
+    if not commands_dir:
+        return f"Unknown target: {target}"
     commands_dir.mkdir(parents=True, exist_ok=True)
     definitions = _skill_definitions(relay_root)
     if name not in definitions:
@@ -136,20 +131,23 @@ def install_skill(name: str, relay_root: Path, target: str = "Claude") -> str:
     return f"Installed /{name} for {target}"
 
 
-def remove_skill(name: str, target: str = "Claude") -> str:
-    path = _target_dir(target) / f"{name}.md"
+def remove_skill(name: str, target: str = "Claude Code") -> str:
+    commands_dir = SKILL_TARGETS.get(target)
+    if not commands_dir:
+        return f"Unknown target: {target}"
+    path = commands_dir / f"{name}.md"
     if path.exists():
         path.unlink()
-        return f"Removed /{name} for {target}"
+        return f"Removed /{name} from {target}"
     return f"/{name} was not installed for {target}"
 
 
-def install_all_skills(relay_root: Path, target: str = "Claude") -> list[str]:
-    return [install_skill(name, relay_root, target) for name in _skill_definitions(relay_root)]
+def install_all_skills(relay_root: Path, target: str = "Claude Code") -> list[str]:
+    return [install_skill(n, relay_root, target) for n in _skill_definitions(relay_root)]
 
 
-def remove_all_skills(relay_root: Path, target: str = "Claude") -> list[str]:
-    return [remove_skill(name, target) for name in _skill_definitions(relay_root)]
+def remove_all_skills(relay_root: Path, target: str = "Claude Code") -> list[str]:
+    return [remove_skill(n, target) for n in _skill_definitions(relay_root)]
 
 def _project_root() -> Path:
     if getattr(sys, "frozen", False):
