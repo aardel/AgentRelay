@@ -363,9 +363,34 @@ async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
             if title_hint:
                 if platform.system() == "Windows":
                     try:
+                        import ctypes
+                        import ctypes.wintypes
                         import pygetwindow as gw
                         matches = [w for w in gw.getAllWindows()
                                    if title_hint in w.title.lower()]
+                        if not matches:
+                            # Title hint not found — locate Windows Terminal by
+                            # process name so messages reach the right window
+                            # even when the tab title is dynamic.
+                            try:
+                                out = subprocess.check_output(
+                                    ["powershell", "-NoProfile", "-Command",
+                                     "(Get-Process WindowsTerminal"
+                                     " -ErrorAction SilentlyContinue).Id"],
+                                    text=True, timeout=3,
+                                ).strip()
+                                pids = {int(p) for p in out.splitlines()
+                                        if p.strip().isdigit()}
+                                GetWTPI = ctypes.windll.user32.GetWindowThreadProcessId
+                                for w in gw.getAllWindows():
+                                    if not w.title:
+                                        continue
+                                    pid = ctypes.wintypes.DWORD()
+                                    GetWTPI(w._hWnd, ctypes.byref(pid))
+                                    if pid.value in pids:
+                                        matches.append(w)
+                            except Exception:
+                                pass
                         if matches:
                             matches[0].activate()
                             time.sleep(0.4)
