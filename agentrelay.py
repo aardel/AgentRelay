@@ -58,6 +58,12 @@ AUTO_ALLOWLIST = {"uname", "hostname", "whoami", "pwd", "ls", "df", "free",
 
 log = logging.getLogger("agentrelay")
 
+# Deliveries queued for the GUI app to type into the agent window.
+# Used on Windows where the GUI process has foreground activation permission
+# and can focus windows reliably (unlike the daemon, which can't when
+# Chrome Remote Desktop or another remote session holds focus).
+_gui_delivery_queue: list[dict] = []
+
 
 # ============================================================
 # Configuration
@@ -355,14 +361,30 @@ async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
                 "stderr": "",
             }
 
-    # No tmux — use pyautogui, targeting by window title if specified
+    # Derive a window title fragment: explicit config > first word of command
+    title_hint = (adapter.window_title or
+                  (adapter.command[0] if adapter.command else "")).lower()
+
+    if platform.system() == "Windows":
+        # On Windows the GUI app (agentrelay_app.py) owns window focus+typing.
+        # It runs in the user's session with foreground activation permission,
+        # so it can set focus even when Chrome Remote Desktop is active.
+        _gui_delivery_queue.append({
+            "id": uuid.uuid4().hex,
+            "prompt": prompt,
+            "title_hint": title_hint,
+            "wait_seconds": wait_seconds,
+        })
+        return {
+            "status": "queued", "exit_code": 0,
+            "stdout": "Queued for GUI delivery.",
+            "stderr": "",
+        }
+
+    # No tmux — pyautogui fallback for Mac/Linux without tmux
     try:
         import pyautogui
         loop = asyncio.get_running_loop()
-
-        # Derive a window title fragment: explicit config > first word of command
-        title_hint = (adapter.window_title or
-                      (adapter.command[0] if adapter.command else "")).lower()
 
         def _focus_and_type():
             import time
@@ -581,6 +603,14 @@ class AgentRelay:
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "node": self.cfg.node_name})
+
+    async def handle_pending_deliveries(self, request: web.Request) -> web.Response:
+        """Return and clear queued GUI deliveries. Localhost-only, no auth needed."""
+        if request.remote not in ("127.0.0.1", "::1"):
+            return web.json_response({"error": "localhost only"}, status=403)
+        items = list(_gui_delivery_queue)
+        _gui_delivery_queue.clear()
+        return web.json_response({"deliveries": items})
 
     async def handle_info(self, request: web.Request) -> web.Response:
         if not self._auth(request):
@@ -1054,6 +1084,7 @@ class AgentRelay:
     def build_app(self) -> web.Application:
         app = web.Application(client_max_size=1024 * 1024)
         app.router.add_get("/health", self.handle_health)
+        app.router.add_get("/pending-deliveries", self.handle_pending_deliveries)
         app.router.add_get("/info", self.handle_info)
         app.router.add_get("/peers", self.handle_peers)
         app.router.add_post("/dispatch", self.handle_dispatch)

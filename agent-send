@@ -92,16 +92,17 @@ async def cmd_list(self_name: str | None = None) -> int:
 
 async def cmd_broadcast(token: str, message: str, agent: str | None,
                         self_name: str | None = None) -> int:
-    """Send message to all discovered peers with no synthesis — fire and forget."""
+    """Send message to all discovered peers in parallel — fire and forget."""
     peers = await discover(timeout=2.5)
     me = self_name or socket.gethostname().split(".")[0]
     targets = {name: addr for name, addr in peers.items() if name != me}
     if not targets:
         print("no peers discovered to broadcast to", file=sys.stderr)
         return 1
-    results = []
+
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=5)
-    for name, (addr, port) in targets.items():
+
+    async def _post_one(name: str, addr: str, port: int) -> dict:
         payload: dict = {
             "task": message,
             "agents": [{"node": name, "agent": agent or "claude"}],
@@ -116,10 +117,14 @@ async def cmd_broadcast(token: str, message: str, agent: str | None,
                     headers={"X-Agent-Token": token},
                 ) as resp:
                     data = await resp.json()
-                results.append({"node": name, "ok": True, "data": data})
+                return {"node": name, "ok": True, "data": data}
             except aiohttp.ClientError as e:
-                results.append({"node": name, "ok": False, "error": str(e)})
-    print(json.dumps(results, indent=2))
+                return {"node": name, "ok": False, "error": str(e)}
+
+    results = await asyncio.gather(
+        *[_post_one(name, addr, port) for name, (addr, port) in targets.items()]
+    )
+    print(json.dumps(list(results), indent=2))
     return 0 if all(r["ok"] for r in results) else 1
 
 

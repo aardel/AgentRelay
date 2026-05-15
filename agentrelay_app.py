@@ -55,6 +55,7 @@ class AgentRelayApp(tk.Tk):
         self._build()
         self.after(300, self.refresh)
         self.after(5000, self._tick)
+        self.after(500, self._poll_deliveries)
 
     def _apply_style(self) -> None:
         self.configure(bg="#f5f5f7")
@@ -196,6 +197,7 @@ class AgentRelayApp(tk.Tk):
         self._nearby_peers: list[dict] = []
 
         self.footer = tk.StringVar()
+        self._delivery_active = False
         ttk.Label(self, textvariable=self.footer, style="Sub.TLabel", padding=6).pack(fill=tk.X)
 
         # Populate skill status on first load
@@ -336,6 +338,111 @@ class AgentRelayApp(tk.Tk):
             self.after(0, _done)
 
         threading.Thread(target=_work, daemon=True).start()
+
+    # ── GUI delivery (interactive agent window focus + typing) ────────────────
+
+    def _poll_deliveries(self) -> None:
+        """Poll the daemon for queued window-delivery items every 500 ms."""
+        def _check():
+            try:
+                from relay_client import _run, _api
+                _, data = _run(_api(
+                    self.cfg.port, self.cfg.token, "GET", "/pending-deliveries"))
+                items = data.get("deliveries") or []
+                if items:
+                    self.after(0, lambda: self._process_deliveries(items))
+            except Exception:
+                pass
+        threading.Thread(target=_check, daemon=True).start()
+        self.after(500, self._poll_deliveries)
+
+    def _process_deliveries(self, items: list) -> None:
+        for item in items:
+            threading.Thread(target=self._deliver, args=(item,), daemon=True).start()
+
+    def _deliver(self, item: dict) -> None:
+        """Focus the target agent window and paste the prompt via ctypes.
+
+        The GUI process holds foreground activation permission, so
+        SetForegroundWindow works here even when Chrome Remote Desktop is
+        active (where the daemon's pyautogui path would fail).
+        """
+        if sys.platform != "win32":
+            return
+        import ctypes
+        import ctypes.wintypes
+        import subprocess
+        import time
+
+        prompt = item["prompt"]
+        title_hint = item.get("title_hint", "").lower()
+        wait_seconds = item.get("wait_seconds", 5)
+
+        # Save and overwrite clipboard with the prompt
+        try:
+            import pyperclip
+            prev_clip = pyperclip.paste()
+            pyperclip.copy(prompt)
+        except Exception:
+            prev_clip = None
+
+        # Locate target window
+        hwnd = None
+        if title_hint:
+            try:
+                import pygetwindow as gw
+                matches = [w for w in gw.getAllWindows()
+                           if title_hint in w.title.lower()]
+                if not matches:
+                    # Fall back to any WindowsTerminal window
+                    out = subprocess.check_output(
+                        ["powershell", "-NoProfile", "-Command",
+                         "(Get-Process WindowsTerminal"
+                         " -ErrorAction SilentlyContinue).Id"],
+                        text=True, timeout=3,
+                    ).strip()
+                    pids = {int(p) for p in out.splitlines() if p.strip().isdigit()}
+                    GetPID = ctypes.windll.user32.GetWindowThreadProcessId
+                    for w in gw.getAllWindows():
+                        if not w.title:
+                            continue
+                        pid = ctypes.wintypes.DWORD()
+                        GetPID(w._hWnd, ctypes.byref(pid))
+                        if pid.value in pids:
+                            matches.append(w)
+                if matches:
+                    hwnd = matches[0]._hWnd
+            except Exception:
+                pass
+
+        if hwnd:
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            time.sleep(0.4)
+
+        # Ctrl+V to paste
+        ke = ctypes.windll.user32.keybd_event
+        VK_CONTROL, VK_V, KEYEVENTF_KEYUP = 0x11, 0x56, 0x0002
+        ke(VK_CONTROL, 0, 0, 0)
+        ke(VK_V, 0, 0, 0)
+        ke(VK_V, 0, KEYEVENTF_KEYUP, 0)
+        ke(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+
+        # Wait, then press Enter to submit
+        time.sleep(max(1, wait_seconds))
+        VK_RETURN = 0x0D
+        ke(VK_RETURN, 0, 0, 0)
+        ke(VK_RETURN, 0, KEYEVENTF_KEYUP, 0)
+
+        # Restore clipboard
+        if prev_clip is not None:
+            time.sleep(0.3)
+            try:
+                pyperclip.copy(prev_clip)
+            except Exception:
+                pass
+
+        label = title_hint or "window"
+        self.after(0, lambda: self.footer.set(f"Delivered to '{label}' via GUI"))
 
     # ── Peers ─────────────────────────────────────────────────────────────────
 
