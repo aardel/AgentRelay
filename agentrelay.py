@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import dataclasses
 import json
 import logging
@@ -51,6 +52,7 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 
 from pairing import PairingManager
 from talk import ConversationStore
+from pty_session import PTYSession, pty_registry
 
 SERVICE_TYPE = "_agentrelay._tcp.local."
 INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
@@ -1212,6 +1214,133 @@ class AgentRelay:
             return web.json_response({"error": "thread not found"}, status=404)
         return web.json_response({"thread_id": thread_id, "messages": messages})
 
+    # ---- /terminal WebSocket handler ----
+
+    async def handle_terminal(self, request: web.Request) -> web.WebSocketResponse:
+        """
+        WebSocket endpoint for embedded terminal sessions.
+
+        Protocol frames (JSON):
+          open   → create/attach session, returns open_ack with write_token (owner)
+                   or null write_token (remote viewer)
+          input  → send keystrokes, requires write_token
+          resize → resize PTY, requires write_token; viewers adjust client-side only
+          close  → terminate session, requires write_token
+
+        Auth: X-Agent-Token header required (same token as all other endpoints).
+        """
+        if not self._auth(request):
+            return web.Response(status=401, text="unauthorized")
+
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        session: PTYSession | None = None
+
+        try:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        frame = json.loads(msg.data)
+                    except json.JSONDecodeError:
+                        await ws.send_str(json.dumps(
+                            {"type": "error", "session_id": None,
+                             "code": "parse_error", "message": "invalid JSON"}))
+                        continue
+
+                    ftype = frame.get("type")
+                    sid = frame.get("session_id")
+
+                    if ftype == "open":
+                        agent = frame.get("agent", "claude")
+                        cols = int(frame.get("cols", 220))
+                        rows = int(frame.get("rows", 50))
+
+                        if sid:
+                            # Re-attach to existing session
+                            session = pty_registry.get(sid)
+                            if not session:
+                                await ws.send_str(json.dumps(
+                                    {"type": "error", "session_id": sid,
+                                     "code": "session_not_found",
+                                     "message": f"no session {sid}"}))
+                                continue
+                            # Remote viewer — no write_token
+                            await session.subscribe(ws, owner=False)
+                        else:
+                            # Create new session — this client is the owner
+                            adapter = self.cfg.adapters.get(agent)
+                            if not adapter:
+                                await ws.send_str(json.dumps(
+                                    {"type": "error", "session_id": None,
+                                     "code": "agent_not_found",
+                                     "message": f"no adapter for agent '{agent}'"}))
+                                continue
+                            session = PTYSession(
+                                agent_name=agent,
+                                node=self.cfg.node_name,
+                                cols=cols,
+                                rows=rows,
+                            )
+                            pty_registry.register(session)
+                            await session.start(list(adapter.command))
+                            await session.subscribe(ws, owner=True)
+
+                    elif ftype == "input":
+                        if not session:
+                            continue
+                        token = frame.get("write_token", "")
+                        data_b64 = frame.get("data", "")
+                        try:
+                            data = base64.b64decode(data_b64).decode("utf-8", errors="replace")
+                            await session.write(data, token)
+                        except PermissionError:
+                            await ws.send_str(json.dumps(
+                                {"type": "error", "session_id": session.session_id,
+                                 "code": "unauthorized",
+                                 "message": "invalid write_token"}))
+                        except Exception as exc:
+                            await ws.send_str(json.dumps(
+                                {"type": "error", "session_id": session.session_id,
+                                 "code": "pty_error", "message": str(exc)}))
+
+                    elif ftype == "resize":
+                        if not session:
+                            continue
+                        token = frame.get("write_token", "")
+                        cols = int(frame.get("cols", session.cols))
+                        rows = int(frame.get("rows", session.rows))
+                        try:
+                            await session.resize(cols, rows, token)
+                        except PermissionError:
+                            await ws.send_str(json.dumps(
+                                {"type": "error", "session_id": session.session_id,
+                                 "code": "unauthorized",
+                                 "message": "invalid write_token"}))
+
+                    elif ftype == "close":
+                        if not session:
+                            continue
+                        token = frame.get("write_token", "")
+                        if token != session.grant_write():
+                            await ws.send_str(json.dumps(
+                                {"type": "error", "session_id": session.session_id,
+                                 "code": "unauthorized",
+                                 "message": "invalid write_token"}))
+                            continue
+                        await session.stop()
+                        pty_registry.remove(session.session_id)
+                        session = None
+
+                elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                    break
+
+        finally:
+            if session:
+                await session.unsubscribe(ws)
+
+        return ws
+
     def build_app(self) -> web.Application:
         app = web.Application(client_max_size=1024 * 1024)
         app.router.add_get("/health", self.handle_health)
@@ -1232,6 +1361,7 @@ class AgentRelay:
         app.router.add_post("/pair/approve", self.handle_pair_approve)
         app.router.add_post("/pair/reject", self.handle_pair_reject)
         app.router.add_get("/pair/poll", self.handle_pair_poll)
+        app.router.add_get("/terminal", self.handle_terminal)
         return app
 
 
