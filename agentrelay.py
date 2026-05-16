@@ -1804,7 +1804,13 @@ class AgentRelay:
             nearby = await _fetch_nearby_agents(self.cfg)
         except Exception:
             nearby = []
-        snippet = build_agent_snippet(self.cfg, nearby)
+
+        agent_id = session.agent_name
+        raw_resume = self.agent_data.get_resume(agent_id)
+        resume = None if "No resume yet" in raw_resume else raw_resume
+        memory = self.agent_data.get_memory(agent_id) or None
+
+        snippet = build_agent_snippet(self.cfg, nearby, resume=resume, memory=memory)
         await asyncio.sleep(1.2)
         if not session.alive:
             return
@@ -1849,7 +1855,13 @@ class AgentRelay:
             nearby = await _fetch_nearby_agents(self.cfg)
         except Exception:
             nearby = []
-        snippet = build_agent_snippet(self.cfg, nearby)
+
+        agent_id = request.rel_url.query.get("agent") or self.cfg.default_agent or ""
+        raw_resume = self.agent_data.get_resume(agent_id) if agent_id else ""
+        resume = None if not agent_id or "No resume yet" in raw_resume else raw_resume
+        memory = self.agent_data.get_memory(agent_id) or None if agent_id else None
+
+        snippet = build_agent_snippet(self.cfg, nearby, resume=resume, memory=memory)
         return web.json_response({"snippet": snippet})
 
     async def handle_api_approve(self, request: web.Request) -> web.Response:

@@ -431,14 +431,30 @@ async def _fetch_nearby_agents(cfg: Config) -> list[dict[str, Any]]:
     return results
 
 
-def build_agent_snippet(cfg: Config, nearby: list[dict[str, Any]] | None = None) -> str:
+def build_agent_snippet(
+    cfg: Config,
+    nearby: list[dict[str, Any]] | None = None,
+    resume: str | None = None,
+    memory: dict[str, Any] | None = None,
+) -> str:
     if nearby is None:
         try:
             nearby = _run(_fetch_nearby_agents(cfg))
         except Exception:
             nearby = []
 
-    lines = [
+    lines: list[str] = []
+
+    if resume or memory:
+        lines.append("## Resumed context\n")
+        if resume:
+            lines += ["### Resume", resume.strip(), ""]
+        if memory:
+            import json as _json
+            lines += ["### Memory", _json.dumps(memory, indent=2), ""]
+        lines.append("---\n")
+
+    lines += [
         "# AgentRelay — you can delegate work to agents on other computers\n",
         f"This computer: {cfg.node_name}",
         "",
