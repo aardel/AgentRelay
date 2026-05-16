@@ -41,41 +41,45 @@ def _skill_definitions(relay_root: Path) -> dict[str, tuple[str, str]]:
     def _agent_skill(agent_key: str, label: str) -> str:
         interactive = f"{agent_key}-interactive"
         return f"""\
-Send a message to the {label} agent on a connected computer via AgentRelay.
+Send a message to the {label} agent via AgentRelay.
 
 The message to send is: $ARGUMENTS
 
 ## Steps
 
 1. Run: `{python} "{send}" --config "{cfg}" --list`
-   Filter out this machine (marked `*`). Find a peer with `{interactive}` in its agents.
-   - Multiple peers with {label}? Ask: "Which computer? [list]"
-   - No peer has `{interactive}`? Fall back to `{agent_key}` (headless).
+   Find a node with `{interactive}` in its agents. This machine is marked `*`
+   and can be addressed as `local`.
+   - Multiple nodes with {label}? Ask: "Which computer? [list]"
+   - No node has `{interactive}`? Fall back to `{agent_key}` (headless).
 
-2. Send: `{python} "{send}" --config "{cfg}" <peer> "<message>" --agent {interactive}`
+2. Send: `{python} "{send}" --config "{cfg}" {interactive}@<node> "<message>"`
+   Use `{interactive}@local` for this computer.
 
-3. Report what was sent, to which peer, and whether it succeeded.
+3. Report what was sent, to which node, and whether it succeeded.
 """
 
     def _generic_skill() -> str:
         return f"""\
-Send a message to any agent on a connected computer via AgentRelay.
+Send a message to any local or connected agent via AgentRelay.
 
 The message to send is: $ARGUMENTS
 
 ## Steps
 
 1. Run: `{python} "{send}" --config "{cfg}" --list`
-   Filter out this machine (`*`). Note available peers.
+   Note available nodes and agents. This machine is marked `*` and can be
+   addressed as `local`.
 
-2. Determine target peer and agent from $ARGUMENTS (e.g. "fix bug --to WINPC --agent codex").
+2. Determine target node and agent from $ARGUMENTS (e.g. "fix bug --to WINPC --agent codex").
    Otherwise:
    - One peer → use it.
    - Multiple peers → ask: "Which computer? [list]"
    - Multiple agents on chosen peer → ask: "Which agent? [list]"
    - Prefer `*-interactive` adapters for visible delivery.
 
-3. Send: `{python} "{send}" --config "{cfg}" <peer> "<message>" --agent <agent>`
+3. Send: `{python} "{send}" --config "{cfg}" <agent>@<node> "<message>"`
+   Use `<agent>@local` for this computer.
 
 4. Report result.
 """
@@ -86,8 +90,8 @@ List all connected computers and their available agents via AgentRelay.
 
 Run: `{python} "{send}" --config "{cfg}" --list`
 
-Show results clearly: mark this machine with `*`, list agents on each peer,
-and suggest the matching `/relay-*` skill for each agent type.
+Show results clearly: mark this machine with `*`, list agents on each node,
+and suggest `agent@node` commands such as `codex@local` or `claude@MAC`.
 """
 
     return {
@@ -301,12 +305,21 @@ def build_agent_snippet(cfg: Config, nearby: list[dict[str, Any]] | None = None)
         "# AgentRelay — you can delegate work to agents on other computers\n",
         f"This computer: {cfg.node_name}",
         "",
+        "Agents on this computer:",
     ]
+
+    local_agents = list(cfg.adapters)
+    if not local_agents:
+        lines.append("  (no agents configured)")
+    for agent in local_agents:
+        lines.append(f"  agent-send {agent}@local \"<task>\"")
+        lines.append(f"  agent-send {agent}@{cfg.node_name} \"<task>\"")
+    lines.append("")
 
     if not nearby:
         lines += [
             "No connected computers found.",
-            "Connect them first in the AgentRelay app.",
+            "Use @local targets, or connect other computers in the AgentRelay app.",
         ]
     else:
         lines.append("Connected computers and their agents:")
@@ -317,13 +330,13 @@ def build_agent_snippet(cfg: Config, nearby: list[dict[str, Any]] | None = None)
                 lines.append("    (no agents configured)")
             for agent in agents:
                 lines.append(
-                    f"    agent-send {peer['name']} \"<task>\" --agent {agent}"
+                    f"    agent-send {agent}@{peer['name']} \"<task>\""
                 )
 
         lines += [
             "",
             "Rules:",
-            "- When a task must run on another computer, say:",
+            "- When delegating, say:",
             "  \"I'll send this to [agent] on [computer].\"",
             "- Use agent-send to dispatch. Never ask the user to do it manually.",
             "- If the user hasn't specified which agent or computer to use,",

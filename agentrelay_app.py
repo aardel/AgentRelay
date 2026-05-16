@@ -43,6 +43,41 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def _agent_ids_from_setup(agents: list[dict]) -> list[str]:
+    return [a["id"] for a in agents if a.get("id")]
+
+
+def _agent_list_from_peer(peer: dict) -> list[str]:
+    agents_raw = peer.get("agents", "")
+    if isinstance(agents_raw, list):
+        return [str(a).strip() for a in agents_raw if str(a).strip()]
+    return [a.strip() for a in str(agents_raw).split(",") if a.strip()]
+
+
+def build_prompt_targets(data: dict, local_port: int) -> list[dict]:
+    """Return selectable send targets for the GUI prompt panel."""
+    node = data.get("node") or "local"
+    local_agents = _agent_ids_from_setup(data.get("agents") or [])
+    targets = [
+        {
+            "name": f"This computer ({node}, use @local)",
+            "address": "127.0.0.1",
+            "port": local_port,
+            "_agents_list": local_agents,
+            "local": True,
+        }
+    ]
+    for peer in data.get("nearby") or []:
+        if not peer.get("connected"):
+            continue
+        targets.append({**peer, "_agents_list": _agent_list_from_peer(peer)})
+    return targets
+
+
+def resolve_prompt_target(targets: list[dict], name: str) -> dict | None:
+    return next((target for target in targets if target["name"] == name), None)
+
+
 class AgentRelayApp(tk.Tk):
     def __init__(self, config_path: Path) -> None:
         super().__init__()
@@ -194,7 +229,7 @@ class AgentRelayApp(tk.Tk):
         ttk.Button(pm, text="Send", command=self._send_prompt).pack(
             anchor=tk.E, pady=(4, 0))
 
-        self._nearby_peers: list[dict] = []
+        self._prompt_targets: list[dict] = []
 
         self.footer = tk.StringVar()
         self._delivery_active = False
@@ -303,8 +338,8 @@ class AgentRelayApp(tk.Tk):
 
     def _refresh_prompt_agents(self) -> None:
         peer_name = self.prompt_peer_var.get()
-        peer = next((p for p in self._nearby_peers if p["name"] == peer_name), None)
-        agents = peer["_agents_list"] if peer else []
+        target = resolve_prompt_target(self._prompt_targets, peer_name)
+        agents = target["_agents_list"] if target else []
         self.prompt_agent_combo["values"] = agents
         self.prompt_agent_var.set(agents[0] if agents else "")
 
@@ -318,11 +353,11 @@ class AgentRelayApp(tk.Tk):
         if not text:
             messagebox.showwarning("AgentRelay", "Enter a message to send.")
             return
-        peer = next((p for p in self._nearby_peers if p["name"] == peer_name), None)
-        if not peer:
-            messagebox.showerror("AgentRelay", f"Peer not found: {peer_name}")
+        target = resolve_prompt_target(self._prompt_targets, peer_name)
+        if not target:
+            messagebox.showerror("AgentRelay", f"Target not found: {peer_name}")
             return
-        addr, port = peer["address"], peer["port"]
+        addr, port = target["address"], target["port"]
         self.footer.set(f"Sending to {peer_name}…")
         self.prompt_text.configure(state=tk.DISABLED)
 
@@ -504,17 +539,8 @@ class AgentRelayApp(tk.Tk):
             w.destroy()
         nearby = data.get("nearby") or []
 
-        # Store for prompt window lookups; keep agents as a list
-        self._nearby_peers = []
-        for p in nearby:
-            agents_raw = p.get("agents", "")
-            if isinstance(agents_raw, list):
-                agents_list = agents_raw
-            else:
-                agents_list = [a.strip() for a in str(agents_raw).split(",") if a.strip()]
-            self._nearby_peers.append({**p, "_agents_list": agents_list})
-
-        connected_names = [p["name"] for p in nearby if p.get("connected")]
+        self._prompt_targets = build_prompt_targets(data, self.cfg.port)
+        connected_names = [p["name"] for p in self._prompt_targets]
         prev_peer = self.prompt_peer_var.get()
         self.prompt_peer_combo["values"] = connected_names
         if prev_peer not in connected_names:

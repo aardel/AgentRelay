@@ -22,6 +22,7 @@ import socket
 import sys
 import uuid
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import yaml
@@ -33,17 +34,61 @@ SERVICE_TYPE = "_agentrelay._tcp.local."
 DEFAULT_CONFIG = Path.home() / ".config" / "agentrelay" / "config.yaml"
 
 
-def load_token(config_path: Path) -> str:
+def load_config(config_path: Path) -> dict[str, Any]:
     if not config_path.exists():
         print(f"no config at {config_path}\n"
               f"run: agentrelay --init", file=sys.stderr)
         sys.exit(1)
     data = yaml.safe_load(config_path.read_text())
+    if not isinstance(data, dict):
+        print("invalid config", file=sys.stderr)
+        sys.exit(1)
+    return data
+
+
+def load_token(config_path: Path) -> str:
+    data = load_config(config_path)
     token = data.get("token")
     if not token:
         print("no token in config", file=sys.stderr)
         sys.exit(1)
     return token
+
+
+def parse_target(target: str, agent_option: str | None) -> tuple[str, str | None]:
+    """Return (node, agent) from legacy node or new agent@node syntax."""
+    if "@" not in target:
+        return target, agent_option
+
+    agent, node = target.split("@", 1)
+    agent = agent.strip()
+    node = node.strip()
+    if not agent or not node:
+        raise ValueError("target must be agent@node")
+    if agent_option and agent_option != agent:
+        raise ValueError(
+            f"--agent {agent_option} conflicts with target agent {agent}")
+    return node, agent
+
+
+def is_local_target(target: str, cfg: dict[str, Any]) -> bool:
+    node_name = cfg.get("node_name") or socket.gethostname().split(".")[0]
+    aliases = {"local", "localhost", "self", node_name}
+    return target in aliases
+
+
+def resolve_target_address(
+    target: str,
+    cfg: dict[str, Any],
+    peers: dict[str, tuple[str, int]],
+) -> tuple[str, int]:
+    if is_local_target(target, cfg):
+        return "127.0.0.1", int(cfg.get("port") or 9876)
+    return peers[target]
+
+
+def parse_agents_csv(value: str) -> list[str]:
+    return [agent.strip() for agent in value.split(",") if agent.strip()]
 
 
 async def _resolve(azc: AsyncZeroconf, name: str, results: dict) -> None:
@@ -76,17 +121,25 @@ async def discover(timeout: float = 2.0) -> dict[str, tuple[str, int]]:
     return results
 
 
-async def cmd_list(self_name: str | None = None) -> int:
+async def cmd_list(cfg: dict[str, Any] | None = None,
+                   self_name: str | None = None) -> int:
     peers = await discover(timeout=2.5)
+    cfg = cfg or {}
+    configured_agents = ",".join((cfg.get("adapters") or {}).keys())
+    if cfg:
+        local_name = cfg.get("node_name") or socket.gethostname().split(".")[0]
+        local_port = int(cfg.get("port") or 9876)
+        peers = {**peers, local_name: ("127.0.0.1", local_port)}
     if not peers:
         print("no peers discovered")
         return 1
     me = self_name or socket.gethostname().split(".")[0]
-    print(f"{'node':<20}  {'address':<16}  {'port':<6}  self?")
-    print(f"{'-' * 20}  {'-' * 16}  {'-' * 6}  -----")
+    print(f"{'node':<20}  {'address':<16}  {'port':<6}  {'agents':<24}  self?")
+    print(f"{'-' * 20}  {'-' * 16}  {'-' * 6}  {'-' * 24}  -----")
     for node, (addr, port) in sorted(peers.items()):
         marker = "*" if node == me else ""
-        print(f"{node:<20}  {addr:<16}  {port:<6}  {marker}")
+        agents = configured_agents if node == me else ""
+        print(f"{node:<20}  {addr:<16}  {port:<6}  {agents:<24}  {marker}")
     return 0
 
 
@@ -128,18 +181,53 @@ async def cmd_broadcast(token: str, message: str, agent: str | None,
     return 0 if all(r["ok"] for r in results) else 1
 
 
+async def cmd_coordinate_local(
+    token: str,
+    message: str,
+    agents: list[str],
+    coordinator_agent: str | None,
+    mode: str,
+    cfg: dict[str, Any],
+) -> int:
+    node_name = cfg.get("node_name") or socket.gethostname().split(".")[0]
+    port = int(cfg.get("port") or 9876)
+    payload = {
+        "task": message,
+        "agents": [{"node": node_name, "agent": agent} for agent in agents],
+        "coordinator_agent": coordinator_agent,
+        "mode": mode,
+    }
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        try:
+            async with session.post(
+                f"http://127.0.0.1:{port}/coordinate",
+                json=payload,
+                headers={"X-Agent-Token": token},
+            ) as resp:
+                data = await resp.json()
+        except aiohttp.ClientError as e:
+            print(f"request failed: {e}", file=sys.stderr)
+            return 1
+
+    print(json.dumps(data, indent=2))
+    return 0 if "error" not in data else 1
+
+
 async def cmd_send(token: str, target: str, command: str,
                    agent: str | None, policy_hint: str | None,
+                   cfg: dict[str, Any] | None = None,
                    self_name: str | None = None) -> int:
+    cfg = cfg or {}
     peers = await discover(timeout=2.5)
-    if target not in peers:
+    if target not in peers and not is_local_target(target, cfg):
         print(f"peer not found: {target}", file=sys.stderr)
         if peers:
             print(f"available: {', '.join(sorted(peers))}", file=sys.stderr)
         else:
             print("no peers discovered on the LAN", file=sys.stderr)
         return 1
-    addr, port = peers[target]
+    addr, port = resolve_target_address(target, cfg, peers)
     url = f"http://{addr}:{port}/dispatch"
     payload: dict = {
         "from": self_name or socket.gethostname().split(".")[0],
@@ -170,12 +258,12 @@ async def cmd_send(token: str, target: str, command: str,
 def main() -> None:
     p = argparse.ArgumentParser(
         prog="agent-send",
-        description="Send a command to a peer agentrelay node.",
+        description="Send a command to a local or connected AgentRelay agent.",
     )
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     p.add_argument("--list", action="store_true",
                    help="list discovered peers and exit")
-    p.add_argument("target", nargs="?", help="target node name")
+    p.add_argument("target", nargs="?", help="target node or agent@node")
     p.add_argument("command", nargs="?",
                    help="natural-language request or shell command")
     p.add_argument("--agent",
@@ -191,17 +279,25 @@ def main() -> None:
                      const="reject", help="(test) ask target to reject")
     p.add_argument("--broadcast", action="store_true",
                    help="send to all discovered peers (no synthesis)")
+    p.add_argument("--local", action="store_true",
+                   help="coordinate multiple agents on this computer")
+    p.add_argument("--agents",
+                   help="comma-separated agents for --local, e.g. claude,codex")
+    p.add_argument("--coordinator-agent",
+                   help="local agent to synthesize --local results")
+    p.add_argument("--mode", choices=("parallel", "sequential"), default="parallel",
+                   help="coordination mode for --local")
     args = p.parse_args()
 
-    token = load_token(args.config)
-
-    node_name = None
-    if args.config.exists():
-        _cfg_data = yaml.safe_load(args.config.read_text())
-        node_name = _cfg_data.get("node_name") or socket.gethostname().split(".")[0]
+    cfg_data = load_config(args.config)
+    token = cfg_data.get("token")
+    if not token:
+        print("no token in config", file=sys.stderr)
+        sys.exit(1)
+    node_name = cfg_data.get("node_name") or socket.gethostname().split(".")[0]
 
     if args.list:
-        sys.exit(asyncio.run(cmd_list(self_name=node_name)))
+        sys.exit(asyncio.run(cmd_list(cfg=cfg_data, self_name=node_name)))
 
     if args.broadcast:
         if not args.command:
@@ -209,11 +305,26 @@ def main() -> None:
         sys.exit(asyncio.run(cmd_broadcast(
             token, args.command, args.agent, self_name=node_name)))
 
+    if args.local:
+        if not args.command:
+            p.error("command required for --local")
+        agents = parse_agents_csv(args.agents or "")
+        if not agents:
+            p.error("--agents is required for --local")
+        sys.exit(asyncio.run(cmd_coordinate_local(
+            token, args.command, agents, args.coordinator_agent,
+            args.mode, cfg_data)))
+
     if not args.target or not args.command:
         p.error("target and command required (or use --list)")
 
+    try:
+        target, agent = parse_target(args.target, args.agent)
+    except ValueError as e:
+        p.error(str(e))
+
     sys.exit(asyncio.run(cmd_send(
-        token, args.target, args.command, args.agent, args.hint,
+        token, target, args.command, agent, args.hint, cfg_data,
         self_name=node_name)))
 
 

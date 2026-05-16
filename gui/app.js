@@ -8,6 +8,7 @@ async function api(path, opts = {}) {
 
 const el = (id) => document.getElementById(id);
 let relayOn = false;
+let sendTargets = [];
 
 function setRelay(on) {
   relayOn = on;
@@ -59,6 +60,60 @@ function renderNearby(list) {
   });
 }
 
+function agentListFromPeer(peer) {
+  if (Array.isArray(peer.agents)) return peer.agents;
+  return String(peer.agents || "")
+    .split(",")
+    .map((a) => a.trim())
+    .filter(Boolean);
+}
+
+function renderSendTargets(data) {
+  const targetSelect = el("send-target");
+  const agentSelect = el("send-agent");
+  const localAgents = (data.agents || []).map((a) => a.id).filter(Boolean);
+  sendTargets = [{
+    name: `This computer (${data.node || "local"}, use @local)`,
+    address: "127.0.0.1",
+    port: data.port || 9876,
+    agents: localAgents,
+  }];
+  for (const peer of data.nearby || []) {
+    if (!peer.connected) continue;
+    sendTargets.push({
+      name: peer.name,
+      address: peer.address,
+      port: peer.port,
+      agents: agentListFromPeer(peer),
+    });
+  }
+
+  const previous = targetSelect.value;
+  targetSelect.innerHTML = "";
+  for (const target of sendTargets) {
+    const option = document.createElement("option");
+    option.value = target.name;
+    option.textContent = target.name;
+    targetSelect.appendChild(option);
+  }
+  if (sendTargets.some((target) => target.name === previous)) {
+    targetSelect.value = previous;
+  }
+  renderSendAgents();
+}
+
+function renderSendAgents() {
+  const selected = sendTargets.find((target) => target.name === el("send-target").value);
+  const agents = selected ? selected.agents : [];
+  el("send-agent").innerHTML = "";
+  for (const agent of agents) {
+    const option = document.createElement("option");
+    option.value = agent;
+    option.textContent = agent;
+    el("send-agent").appendChild(option);
+  }
+}
+
 function renderPending(list) {
   const card = el("pending-card");
   const ul = el("pending-list");
@@ -98,6 +153,7 @@ async function refresh() {
   el("wait-seconds").value = data.wait_before_send_seconds || 5;
   renderAgents(data.agents || []);
   renderNearby(data.nearby || []);
+  renderSendTargets(data);
   const pending = await api("/api/pending");
   renderPending(pending.data.pending || []);
   const snip = await api("/api/agent-snippet");
@@ -144,6 +200,19 @@ el("btn-copy").addEventListener("click", () => {
   navigator.clipboard.writeText(el("agent-snippet").textContent);
   el("btn-copy").textContent = "Copied!";
   setTimeout(() => { el("btn-copy").textContent = "Copy"; }, 2000);
+});
+
+el("send-target").addEventListener("change", renderSendAgents);
+
+el("btn-send").addEventListener("click", async () => {
+  const target = sendTargets.find((item) => item.name === el("send-target").value);
+  const agent = el("send-agent").value;
+  const message = el("send-message").value.trim();
+  if (!target || !agent || !message) {
+    el("send-status").textContent = "Choose a target, agent, and message.";
+    return;
+  }
+  el("send-status").textContent = `Run: agent-send ${agent}@${target.address === "127.0.0.1" ? "local" : target.name} "<message>"`;
 });
 
 refresh();

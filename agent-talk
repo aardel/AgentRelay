@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import socket
 import sys
 from pathlib import Path
 
@@ -31,6 +32,38 @@ def load_config(path: Path) -> dict:
         print(f"no config at {path}\nrun: agentrelay --init", file=sys.stderr)
         sys.exit(1)
     return yaml.safe_load(path.read_text())
+
+
+def parse_target(target: str, to_agent_option: str | None) -> tuple[str, str | None]:
+    """Return (node, to_agent) from legacy node or agent@node syntax."""
+    if "@" not in target:
+        return target, to_agent_option
+
+    agent, node = target.split("@", 1)
+    agent = agent.strip()
+    node = node.strip()
+    if not agent or not node:
+        raise ValueError("target must be agent@node")
+    if to_agent_option and to_agent_option != agent:
+        raise ValueError(
+            f"--to-agent {to_agent_option} conflicts with target agent {agent}")
+    return node, agent
+
+
+def is_local_target(target: str, cfg: dict) -> bool:
+    node_name = cfg.get("node_name") or socket.gethostname().split(".")[0]
+    aliases = {"local", "localhost", "self", node_name}
+    return target in aliases
+
+
+def resolve_target_address(
+    target: str,
+    cfg: dict,
+    peers: dict[str, tuple[str, int]],
+) -> tuple[str, int]:
+    if is_local_target(target, cfg):
+        return "127.0.0.1", int(cfg.get("port") or 9876)
+    return peers[target]
 
 
 async def _resolve(azc: AsyncZeroconf, name: str, results: dict) -> None:
@@ -119,13 +152,13 @@ async def cmd_talk(
     to_agent = to_agent or cfg.get("default_agent") or "claude"
 
     peers = await discover()
-    if target not in peers:
+    if target not in peers and not is_local_target(target, cfg):
         print(f"peer not found: {target}", file=sys.stderr)
         if peers:
             print(f"available: {', '.join(sorted(peers))}", file=sys.stderr)
         return 1
 
-    addr, port = peers[target]
+    addr, port = resolve_target_address(target, cfg, peers)
     payload = {
         "thread_id": thread_id,
         "from_node": from_node,
@@ -163,15 +196,15 @@ async def cmd_talk(
 def main() -> None:
     p = argparse.ArgumentParser(
         prog="agent-talk",
-        description="Hold an agent-to-agent conversation across AgentRelay peers.",
+        description="Hold an agent-to-agent conversation locally or across AgentRelay peers.",
     )
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     p.add_argument("--threads", action="store_true", help="list conversation threads")
     p.add_argument("--show", metavar="THREAD_ID", help="print thread messages")
-    p.add_argument("target", nargs="?", help="peer node name")
-    p.add_argument("message", nargs="?", help="message for the remote agent")
+    p.add_argument("target", nargs="?", help="target node or agent@node")
+    p.add_argument("message", nargs="?", help="message for the target agent")
     p.add_argument("--from-agent", help="your local agent identity in this thread")
-    p.add_argument("--to-agent", help="remote agent adapter to invoke")
+    p.add_argument("--to-agent", help="target agent adapter to invoke")
     p.add_argument("--thread", dest="thread_id", help="continue an existing thread")
     args = p.parse_args()
 
@@ -184,10 +217,15 @@ def main() -> None:
     if not args.target or not args.message:
         p.error("target and message required (or use --threads / --show)")
 
+    try:
+        target, to_agent = parse_target(args.target, args.to_agent)
+    except ValueError as e:
+        p.error(str(e))
+
     sys.exit(asyncio.run(cmd_talk(
-        cfg, args.target, args.message,
+        cfg, target, args.message,
         from_agent=args.from_agent,
-        to_agent=args.to_agent,
+        to_agent=to_agent,
         thread_id=args.thread_id,
     )))
 

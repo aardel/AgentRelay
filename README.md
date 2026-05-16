@@ -69,6 +69,9 @@ open dist/AgentRelay.app
 |------|---------|
 | Open setup app | `agentrelay-gui` |
 | Forward a request | `agent-forward mac "install the build tools"` |
+| Send to a specific agent | `agent-send codex@mac "fix the failing build"` |
+| Send to an agent on this PC | `agent-send claude@local "review this repo"` |
+| Ask several local agents | `agent-send --local --agents claude,codex "compare approaches"` |
 | List nearby | shown in the app (refreshes automatically) |
 
 ## Visible agent window (Mac)
