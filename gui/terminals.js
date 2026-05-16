@@ -276,5 +276,13 @@
     return selection;
   }
 
-  global.AgentRelayTerminals = { openTerminal, closeTab, deliverToAgent, getActiveSelection };
+  function clearActiveTerminal() {
+    tabs.forEach((tab) => {
+      if (tab.panel.classList.contains("active")) {
+        tab.term.clear();
+      }
+    });
+  }
+
+  global.AgentRelayTerminals = { openTerminal, closeTab, deliverToAgent, getActiveSelection, clearActiveTerminal };
 })(window);

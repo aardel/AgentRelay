@@ -48,7 +48,13 @@ async function api(path, opts = {}) {
     "X-Agent-Token": AUTH_TOKEN,
     ...(opts.headers || {}),
   };
-  const r = await fetch(`http://127.0.0.1:${API_PORT}${path}`, { ...opts, headers });
+  // Use relative path if we are on the same host, otherwise use hardcoded 127.0.0.1
+  const baseUrl = window.location.origin.includes("127.0.0.1") || window.location.origin.includes("localhost")
+    ? ""
+    : `http://127.0.0.1:${API_PORT}`;
+
+  const url = path.startsWith("http") ? path : `${baseUrl}${path}`;
+  const r = await fetch(url, { ...opts, headers });
   let data = {};
   try {
     data = await r.json();
@@ -389,7 +395,7 @@ function refreshCoordAgents(data) {
 
   const list = el("coord-agents-list");
   const synthSelect = el("coord-synthesizer");
-  
+
   // Keep track of which ones were checked
   const checked = new Set();
   list.querySelectorAll("input:checked").forEach(i => checked.add(i.value));
@@ -500,7 +506,7 @@ el("btn-coord-run").addEventListener("click", async () => {
 
   el("coord-status").textContent = "Coordination complete.";
   el("coord-results-card").hidden = false;
-  
+
   if (data.synthesis) {
     el("coord-synthesis-wrap").hidden = false;
     const synthWrap = el("coord-synthesis");
@@ -645,6 +651,10 @@ el("btn-send").addEventListener("click", async () => {
   if (ok) el("send-message").value = "";
 });
 
+el("btn-clear-send").addEventListener("click", () => {
+  el("send-message").value = "";
+  el("send-status").textContent = "";
+});
 function openAgentTerminal(agent, { injectSnippet = false, reuse = false } = {}) {
   if (!agent) return;
   showView("terminals");
@@ -673,6 +683,10 @@ el("btn-relay-selection").addEventListener("click", () => {
     return;
   }
   relayContent(selection);
+});
+
+el("btn-clear-terminal").addEventListener("click", () => {
+  window.AgentRelayTerminals?.clearActiveTerminal();
 });
 
 el("btn-launch-agent").addEventListener("click", async () => {
@@ -948,6 +962,29 @@ function escHtml(s) {
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+function apiAgentPath(agent) {
+  return encodeURIComponent(agent);
+}
+
+function renderSafeMarkdown(markdown) {
+  const html = marked.parse(escHtml(markdown));
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  template.content.querySelectorAll("script, style, iframe, object, embed").forEach((node) => node.remove());
+  template.content.querySelectorAll("*").forEach((node) => {
+    for (const attr of Array.from(node.attributes)) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value.trim().toLowerCase();
+      if (name.startsWith("on")) {
+        node.removeAttribute(attr.name);
+      } else if ((name === "href" || name === "src") && value.startsWith("javascript:")) {
+        node.removeAttribute(attr.name);
+      }
+    }
+  });
+  return template.innerHTML;
+}
+
 function relTime(ts) {
   const d = Math.round(Date.now() / 1000 - ts);
   if (d < 60) return `${d}s ago`;
@@ -1006,6 +1043,142 @@ document.querySelector('.nav-item[data-view="tasks"]')
   ?.addEventListener("click", initTasksPanel);
 
 el("btn-tasks-refresh")?.addEventListener("click", fetchTasks);
+
+// ── Resumes & Memory ────────────────────────────────────────────────────────
+
+let selectedResumeAgent = null;
+
+async function refreshResumes() {
+  const { ok, data } = await api("/api/status");
+  if (!ok) return;
+  const list = el("resumes-agent-list");
+  list.innerHTML = "";
+  const agents = (data.agents || []).map(a => a.id);
+  if (!agents.length) {
+    list.innerHTML = '<li class="empty" style="padding:1rem">No local agents found</li>';
+    return;
+  }
+  for (const agent of agents) {
+    const li = document.createElement("li");
+    li.textContent = agent;
+    li.className = selectedResumeAgent === agent ? "active" : "";
+    li.style.cursor = "pointer";
+    li.style.borderRadius = "0";
+    li.style.border = "none";
+    li.style.borderBottom = "1px solid var(--border)";
+    li.addEventListener("click", () => showResume(agent));
+    list.appendChild(li);
+  }
+}
+
+async function showResume(agent) {
+  selectedResumeAgent = agent;
+  const agentPath = apiAgentPath(agent);
+  const { ok: rOk, data: rData } = await api(`/api/agents/${agentPath}/resume`);
+  const { ok: mOk, data: mData } = await api(`/api/agents/${agentPath}/memory`);
+
+  el("resume-agent-name").textContent = agent;
+  el("btn-edit-resume").hidden = false;
+  el("resume-display").hidden = false;
+  el("resume-editor-wrap").hidden = true;
+  el("memory-card").hidden = false;
+
+  if (rOk) {
+    el("resume-display").innerHTML = renderSafeMarkdown(rData.resume);
+    el("resume-editor").value = rData.resume;
+  }
+
+  renderMemory(mOk ? mData.memory || {} : {});
+  refreshResumes(); // Update active class
+}
+
+function renderMemory(memory) {
+  const container = el("memory-display");
+  container.innerHTML = "";
+  const keys = Object.keys(memory);
+  if (!keys.length) {
+    container.innerHTML = '<p class="hint">No facts remembered yet.</p>';
+    return;
+  }
+  for (const k of keys) {
+    const div = document.createElement("div");
+    div.className = "memory-fact";
+    div.innerHTML = `
+      <span class="memory-key">${escHtml(k)}</span>
+      <span class="memory-val">${escHtml(memory[k])}</span>
+      <button type="button" class="btn ghost small btn-del-mem" style="padding:0 0.4rem" data-key="${escHtml(k)}">&times;</button>
+    `;
+    div.querySelector(".btn-del-mem").addEventListener("click", () => deleteMemoryFact(k));
+    container.appendChild(div);
+  }
+}
+
+async function saveResume() {
+  const content = el("resume-editor").value;
+  const { ok } = await api(`/api/agents/${apiAgentPath(selectedResumeAgent)}/resume`, {
+    method: "POST",
+    body: JSON.stringify({ resume: content })
+  });
+  if (ok) {
+    showResume(selectedResumeAgent);
+    setFooter(`Resume saved for ${selectedResumeAgent}`);
+  }
+}
+
+async function addMemoryFact() {
+  if (!selectedResumeAgent) return;
+  const k = el("memory-key").value.trim();
+  const v = el("memory-val").value.trim();
+  if (!k || !v) return;
+
+  const { ok, data } = await api(`/api/agents/${apiAgentPath(selectedResumeAgent)}/memory`);
+  if (!ok) return;
+  const mem = data.memory || {};
+  mem[k] = v;
+
+  const { ok: sOk } = await api(`/api/agents/${apiAgentPath(selectedResumeAgent)}/memory`, {
+    method: "POST",
+    body: JSON.stringify({ memory: mem })
+  });
+  if (sOk) {
+    el("memory-key").value = "";
+    el("memory-val").value = "";
+    showResume(selectedResumeAgent);
+    setFooter("Fact added to memory");
+  }
+}
+
+async function deleteMemoryFact(key) {
+  const { ok, data } = await api(`/api/agents/${apiAgentPath(selectedResumeAgent)}/memory`);
+  if (!ok) return;
+  const mem = data.memory || {};
+  delete mem[key];
+
+  const { ok: sOk } = await api(`/api/agents/${apiAgentPath(selectedResumeAgent)}/memory`, {
+    method: "POST",
+    body: JSON.stringify({ memory: mem })
+  });
+  if (sOk) {
+    showResume(selectedResumeAgent);
+    setFooter("Fact removed from memory");
+  }
+}
+
+el("btn-resumes-refresh")?.addEventListener("click", refreshResumes);
+el("btn-edit-resume")?.addEventListener("click", () => {
+  el("resume-display").hidden = true;
+  el("resume-editor-wrap").hidden = false;
+  el("btn-edit-resume").hidden = true;
+});
+el("btn-cancel-resume")?.addEventListener("click", () => {
+  el("resume-display").hidden = false;
+  el("resume-editor-wrap").hidden = true;
+  el("btn-edit-resume").hidden = false;
+});
+el("btn-save-resume")?.addEventListener("click", saveResume);
+el("btn-add-memory")?.addEventListener("click", addMemoryFact);
+
+document.querySelector('.nav-item[data-view="resumes"]')?.addEventListener("click", refreshResumes);
 
 refresh();
 refreshSkills();

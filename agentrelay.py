@@ -56,6 +56,7 @@ from talk import ConversationStore
 from pty_session import PTYSession, pty_registry
 from task_queue import TaskQueue
 from ssh_hosts import SSHHost, get_machine_id, get_store as get_ssh_store, test_ssh_connectivity
+from agent_data import AgentDataStore
 
 SERVICE_TYPE = "_agentrelay._tcp.local."
 INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
@@ -550,6 +551,27 @@ async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
             "stderr": "",
         }
 
+    # Derive a window title fragment: explicit config > first word of command
+    title_hint = (adapter.window_title or
+                  (adapter.command[0] if adapter.command else "")).lower()
+
+    if platform.system() == "Windows":
+        # On Windows the GUI app (agentrelay_app.py) owns window focus+typing.
+        # It runs in the user's session with foreground activation permission,
+        # so it can set focus even when Chrome Remote Desktop is active.
+        _gui_delivery_queue.append({
+            "id": uuid.uuid4().hex,
+            "adapter_name": adapter.name,
+            "prompt": prompt,
+            "title_hint": title_hint,
+            "wait_seconds": wait_seconds,
+        })
+        return {
+            "status": "queued", "exit_code": 0,
+            "stdout": "Queued for GUI delivery.",
+            "stderr": "",
+        }
+
     if shutil.which("tmux"):
         session = adapter.session or f"agentrelay-{adapter.name}"
         check = await run_subprocess(
@@ -581,27 +603,6 @@ async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
                     f"sent after {wait_seconds}s."),
                 "stderr": "",
             }
-
-    # Derive a window title fragment: explicit config > first word of command
-    title_hint = (adapter.window_title or
-                  (adapter.command[0] if adapter.command else "")).lower()
-
-    if platform.system() == "Windows":
-        # On Windows the GUI app (agentrelay_app.py) owns window focus+typing.
-        # It runs in the user's session with foreground activation permission,
-        # so it can set focus even when Chrome Remote Desktop is active.
-        _gui_delivery_queue.append({
-            "id": uuid.uuid4().hex,
-            "adapter_name": adapter.name,
-            "prompt": prompt,
-            "title_hint": title_hint,
-            "wait_seconds": wait_seconds,
-        })
-        return {
-            "status": "queued", "exit_code": 0,
-            "stdout": "Queued for GUI delivery.",
-            "stderr": "",
-        }
 
     # No tmux — pyautogui fallback for Mac/Linux without tmux
     try:
@@ -748,6 +749,7 @@ class AgentRelay:
         self.peers = PeerRegistry()
         self.talk = ConversationStore()
         self.pairing = PairingManager()
+        self.agent_data = AgentDataStore()
         self.azc: AsyncZeroconf | None = None
         self.browser: AsyncServiceBrowser | None = None
         self.service_info: ServiceInfo | None = None
@@ -914,9 +916,9 @@ class AgentRelay:
         return web.json_response({"ok": True})
 
     async def handle_inbox(self, request: web.Request) -> web.Response:
-        """Return recent incoming dispatches. Localhost-only. ?since=<ts> filters by timestamp."""
-        if request.remote not in ("127.0.0.1", "::1"):
-            return web.json_response({"error": "localhost only"}, status=403)
+        """Return recent incoming dispatches. Localhost-only or authenticated."""
+        if not self._localhost(request) and not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
         since = float(request.rel_url.query.get("since", 0))
         from_node = request.rel_url.query.get("from", "")
         items = [
@@ -1066,9 +1068,9 @@ class AgentRelay:
     # ------------------------------------------------------------------
 
     async def handle_tasks_list(self, request: web.Request) -> web.Response:
-        """GET /api/tasks — list tasks. Localhost-only."""
-        if not self._localhost(request):
-            return web.json_response({"error": "localhost only"}, status=403)
+        """GET /api/tasks — list tasks. Localhost-only or authenticated."""
+        if not self._localhost(request) and not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
         qs = request.rel_url.query
         tasks = await get_task_queue().list_tasks(
             status=qs.get("status") or None,
@@ -1958,6 +1960,47 @@ class AgentRelay:
         asyncio.create_task(_shutdown())
         return web.json_response({"ok": True})
 
+    async def handle_api_resume_get(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        agent = request.match_info["agent"]
+        return web.json_response({"agent": agent, "resume": self.agent_data.get_resume(agent)})
+
+    async def handle_api_resume_save(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        agent = request.match_info["agent"]
+        try:
+            self.agent_data.save_resume(agent, body.get("resume", ""))
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"ok": True})
+
+    async def handle_api_memory_get(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        agent = request.match_info["agent"]
+        return web.json_response({"agent": agent, "memory": self.agent_data.get_memory(agent)})
+
+    async def handle_api_memory_save(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        agent = request.match_info["agent"]
+        data = body.get("memory", {})
+        try:
+            self.agent_data.save_memory(agent, data)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"ok": True})
+
     async def handle_api_terminal_sessions(self, request: web.Request) -> web.Response:
         if not self._auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -2209,6 +2252,10 @@ class AgentRelay:
         app.router.add_get("/api/tasks/events", self.handle_task_events)
         app.router.add_get("/api/tasks/{id}", self.handle_task_get)
         app.router.add_post("/api/tasks/{id}/status", self.handle_task_status)
+        app.router.add_get("/api/agents/{agent}/resume", self.handle_api_resume_get)
+        app.router.add_post("/api/agents/{agent}/resume", self.handle_api_resume_save)
+        app.router.add_get("/api/agents/{agent}/memory", self.handle_api_memory_get)
+        app.router.add_post("/api/agents/{agent}/memory", self.handle_api_memory_save)
         app.router.add_get("/api/ssh-hosts", self.handle_api_ssh_hosts)
         app.router.add_post("/api/ssh-hosts", self.handle_api_ssh_hosts_save)
         app.router.add_get("/api/ssh-hosts/pending-presets", self.handle_api_ssh_pending)

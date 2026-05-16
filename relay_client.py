@@ -61,6 +61,11 @@ The message to send is: $ARGUMENTS
    Use `{interactive}@local` for this computer.
 
 3. Report what was sent, to which node, and whether it succeeded.
+
+## Identity & Memory
+- You have a persistent RESUME at: /api/agents/{agent_key}/resume
+- You have a persistent MEMORY at: /api/agents/{agent_key}/memory
+- Use these to maintain your identity and remember key facts across tasks.
 """
 
     def _generic_skill() -> str:
@@ -86,6 +91,10 @@ The message to send is: $ARGUMENTS
    Use `<agent>@local` for this computer.
 
 4. Report result.
+
+## Identity & Memory
+- Every agent has a RESUME at: /api/agents/<agent_key>/resume
+- Every agent has a MEMORY at: /api/agents/<agent_key>/memory
 """
 
     def _peers_skill() -> str:
@@ -433,6 +442,11 @@ def build_agent_snippet(cfg: Config, nearby: list[dict[str, Any]] | None = None)
                 )
 
         lines += [
+            "",
+            "Identity & Memory:",
+            f"- You have a persistent RESUME at: /api/agents/{cfg.default_agent or 'agent'}/resume",
+            f"- You have a persistent MEMORY at: /api/agents/{cfg.default_agent or 'agent'}/memory",
+            "- Use these to maintain your identity and remember key facts across tasks.",
             "",
             "Rules:",
             "- When delegating, say:",

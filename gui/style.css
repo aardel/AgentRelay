@@ -472,6 +472,24 @@ textarea { resize: vertical; min-height: 5rem; }
 .coord-result-agent { font-weight: 600; font-size: 0.9rem; }
 .coord-result-meta { font-size: 0.8rem; color: var(--muted); }
 
+/* ── Resumes & Memory ────────────────────────────────────────────────────── */
+
+.markdown-body { font-size: 0.95rem; line-height: 1.6; color: #e6edf3; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3 { margin-top: 1.5rem; margin-bottom: 1rem; font-weight: 600; line-height: 1.25; }
+.markdown-body h1 { font-size: 1.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+.markdown-body h2 { font-size: 1.25rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+.markdown-body p { margin-bottom: 1rem; }
+.markdown-body ul { padding-left: 2em; margin-bottom: 1rem; }
+.markdown-body li { list-style: disc; margin-bottom: 0.25rem; }
+.markdown-body code { background: rgba(255,255,255,0.1); padding: 0.2em 0.4em; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 85%; }
+.markdown-body pre { background: var(--bg); padding: 1rem; border-radius: 6px; overflow: auto; margin-bottom: 1rem; border: 1px solid var(--border); }
+.markdown-body pre code { background: none; padding: 0; font-size: 100%; }
+
+.memory-fact { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+.memory-fact:last-child { border-bottom: none; }
+.memory-key { font-weight: 600; color: var(--muted); flex: 1; }
+.memory-val { flex: 2; word-break: break-all; }
+
 .footer {
   height: 28px;
   line-height: 28px;

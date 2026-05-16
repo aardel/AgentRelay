@@ -1,11 +1,14 @@
 """GUI API routes on the aiohttp app."""
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
 from agentrelay import AgentRelay, Config
+from agent_data import AgentDataStore
 
 
 def _minimal_cfg() -> Config:
@@ -25,7 +28,9 @@ def _minimal_cfg() -> Config:
 
 class GuiApiRoutesTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
         self.relay = AgentRelay(_minimal_cfg())
+        self.relay.agent_data = AgentDataStore(Path(self.tmp.name))
         self.app = self.relay.build_app()
         self.server = TestServer(self.app)
         self.client = TestClient(self.server)
@@ -33,6 +38,7 @@ class GuiApiRoutesTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.client.close()
+        self.tmp.cleanup()
 
     async def test_gui_index_served(self) -> None:
         resp = await self.client.get("/")
@@ -102,6 +108,42 @@ class GuiApiRoutesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["requested_agent"], "gemini")
         self.assertEqual(data["resolved_agent"], "gemini-interactive")
         self.assertEqual(spawned.await_args.args[1].name, "gemini-interactive")
+
+    async def test_resume_and_memory_routes(self) -> None:
+        headers = {"X-Agent-Token": "test-token-12345678901234567890"}
+
+        resp = await self.client.post(
+            "/api/agents/claude/resume",
+            headers=headers,
+            json={"resume": "# Claude"},
+        )
+        self.assertEqual(resp.status, 200)
+
+        resp = await self.client.get("/api/agents/claude/resume", headers=headers)
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["resume"], "# Claude")
+
+        resp = await self.client.post(
+            "/api/agents/claude/memory",
+            headers=headers,
+            json={"memory": {"project": "AgentRelay"}},
+        )
+        self.assertEqual(resp.status, 200)
+
+        resp = await self.client.get("/api/agents/claude/memory", headers=headers)
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["memory"], {"project": "AgentRelay"})
+
+    async def test_memory_route_rejects_non_object(self) -> None:
+        headers = {"X-Agent-Token": "test-token-12345678901234567890"}
+        resp = await self.client.post(
+            "/api/agents/claude/memory",
+            headers=headers,
+            json={"memory": ["bad"]},
+        )
+        self.assertEqual(resp.status, 400)
 
 
 if __name__ == "__main__":
