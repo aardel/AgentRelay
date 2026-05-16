@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import yaml
 from aiohttp import web
 from zeroconf import IPVersion, ServiceInfo, ServiceStateChange
