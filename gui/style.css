@@ -427,6 +427,50 @@ textarea { resize: vertical; min-height: 5rem; }
 
 .skill-status.installed { color: var(--green); }
 
+.coord-agents-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.coord-agent-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.coord-agent-item input { width: auto; margin: 0; }
+
+.coord-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.coord-result-item {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1rem;
+}
+
+.coord-result-item:last-child { border-bottom: none; }
+
+.coord-result-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.coord-result-agent { font-weight: 600; font-size: 0.9rem; }
+.coord-result-meta { font-size: 0.8rem; color: var(--muted); }
+
 .footer {
   height: 28px;
   line-height: 28px;

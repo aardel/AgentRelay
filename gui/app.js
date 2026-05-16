@@ -257,7 +257,230 @@ async function refresh() {
     lastInboxTs = Math.max(...messages.map((m) => m.ts));
     renderInbox(messages);
   }
+
+  refreshSSH();
+  refreshCoordAgents(data);
 }
+
+async function refreshSSH() {
+  const { ok, data } = await api("/api/ssh-hosts");
+  if (!ok) return;
+  renderSSHHosts(data.hosts || []);
+
+  const pending = await api("/api/ssh-hosts/pending-presets");
+  renderSSHPending(pending.data.pending || []);
+}
+
+function renderSSHHosts(hosts) {
+  const ul = el("ssh-hosts-list");
+  ul.innerHTML = "";
+  if (!hosts.length) {
+    ul.innerHTML = '<li class="empty">No SSH presets yet.</li>';
+    return;
+  }
+  for (const h of hosts) {
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <div class="peer-row">
+        <div>
+          <div class="peer-name">${h.node_name}</div>
+          <div class="peer-meta">${h.user}@${h.host}:${h.port}</div>
+        </div>
+        <div class="row">
+          <button type="button" class="btn ghost small btn-ssh-test" data-node="${h.node_name}">Test</button>
+          <button type="button" class="btn ghost small btn-ssh-delete" data-node="${h.node_name}">Delete</button>
+        </div>
+      </div>`;
+    ul.appendChild(li);
+  }
+  ul.querySelectorAll(".btn-ssh-test").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "Testing...";
+      const { ok, data } = await api(`/api/ssh-hosts/${btn.dataset.node}/test`, { method: "POST" });
+      btn.disabled = false;
+      btn.textContent = "Test";
+      setFooter(ok ? `SSH Success: ${data.message}` : `SSH Failed: ${data.error || data.message}`);
+    });
+  });
+  ul.querySelectorAll(".btn-ssh-delete").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm(`Delete SSH preset for ${btn.dataset.node}?`)) return;
+      await api(`/api/ssh-hosts/${btn.dataset.node}`, { method: "DELETE" });
+      refreshSSH();
+    });
+  });
+}
+
+function renderSSHPending(pending) {
+  const card = el("ssh-pending-card");
+  const ul = el("ssh-pending-list");
+  if (!pending || !pending.length) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  ul.innerHTML = "";
+  for (const p of pending) {
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <div class="peer-row">
+        <span>${p.type === "rename" ? `<strong>${p.old_node_name}</strong> renamed to <strong>${p.new_node_name}</strong>` : `New peer <strong>${p.node_name}</strong> discovered`}</span>
+        <button type="button" class="btn primary small btn-ssh-apply" data-raw='${JSON.stringify(p)}'>Apply</button>
+      </div>`;
+    ul.appendChild(li);
+  }
+  ul.querySelectorAll(".btn-ssh-apply").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const p = JSON.parse(btn.dataset.raw);
+      el("ssh-node").value = p.new_node_name || p.node_name;
+      el("ssh-host").value = p.host;
+      el("ssh-user").value = "";
+      el("ssh-form-card").hidden = false;
+    });
+  });
+}
+
+function refreshCoordAgents(data) {
+  if (!data) return;
+
+  const list = el("coord-agents-list");
+  const synthSelect = el("coord-synthesizer");
+  
+  // Keep track of which ones were checked
+  const checked = new Set();
+  list.querySelectorAll("input:checked").forEach(i => checked.add(i.value));
+  const prevSynth = synthSelect.value;
+
+  list.innerHTML = "";
+  synthSelect.innerHTML = '<option value="">None (Broadcast only)</option>';
+
+  const allAgents = [];
+  // Local agents
+  for (const a of data.agents || []) {
+    allAgents.push({ node: data.node, agent: a.id, label: `${a.id}@${data.node}` });
+  }
+  // Remote agents
+  for (const p of data.nearby || []) {
+    if (!p.connected) continue;
+    const pAgents = agentListFromPeer(p);
+    for (const a of pAgents) {
+      allAgents.push({ node: p.name, agent: a, label: `${a}@${p.name}` });
+    }
+  }
+
+  for (const item of allAgents) {
+    const val = `${item.agent}@${item.node}`;
+    const div = document.createElement("div");
+    div.className = "coord-agent-item";
+    const isChecked = checked.has(val) ? "checked" : "";
+    div.innerHTML = `<label><input type="checkbox" value="${val}" ${isChecked}> ${item.label}</label>`;
+    list.appendChild(div);
+
+    if (item.node === data.node) {
+      const opt = document.createElement("option");
+      opt.value = item.agent;
+      opt.textContent = item.label;
+      synthSelect.appendChild(opt);
+    }
+  }
+  synthSelect.value = prevSynth;
+}
+
+el("btn-add-ssh").addEventListener("click", () => {
+  el("ssh-form-card").hidden = false;
+});
+
+el("btn-ssh-cancel").addEventListener("click", () => {
+  el("ssh-form-card").hidden = true;
+});
+
+el("btn-ssh-save").addEventListener("click", async () => {
+  const btn = el("btn-ssh-save");
+  btn.disabled = true;
+  btn.textContent = "Testing...";
+  const payload = {
+    node_name: el("ssh-node").value.trim(),
+    host: el("ssh-host").value.trim(),
+    user: el("ssh-user").value.trim(),
+    port: parseInt(el("ssh-port").value, 10) || 22,
+    key_path: el("ssh-key").value.trim(),
+  };
+  const { ok, data } = await api("/api/ssh-hosts", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  btn.disabled = false;
+  btn.textContent = "Test & Save";
+  if (!ok) {
+    setFooter(data.error || data.message || "Failed to save SSH host");
+    return;
+  }
+  el("ssh-form-card").hidden = true;
+  refreshSSH();
+});
+
+el("btn-coord-run").addEventListener("click", async () => {
+  const btn = el("btn-coord-run");
+  const task = el("coord-task").value.trim();
+  const selected = Array.from(el("coord-agents-list").querySelectorAll("input:checked")).map(i => {
+    const [agent, node] = i.value.split("@");
+    return { agent, node };
+  });
+
+  if (!task || !selected.length) {
+    el("coord-status").textContent = "Select agents and enter a task.";
+    return;
+  }
+
+  btn.disabled = true;
+  el("coord-status").textContent = "Coordinating...";
+  el("coord-results-card").hidden = true;
+
+  const coordinator_agent = el("coord-synthesizer").value || null;
+
+  const { ok, data } = await api("/api/coordinate", {
+    method: "POST",
+    body: JSON.stringify({
+      task,
+      agents: selected,
+      mode: el("coord-mode").value,
+      coordinator_agent,
+    }),
+  });
+
+  btn.disabled = false;
+  if (!ok) {
+    el("coord-status").textContent = data.error || "Coordination failed.";
+    return;
+  }
+
+  el("coord-status").textContent = "Coordination complete.";
+  el("coord-results-card").hidden = false;
+  
+  if (data.synthesis) {
+    el("coord-synthesis-wrap").hidden = false;
+    el("coord-synthesis").textContent = data.synthesis;
+  } else {
+    el("coord-synthesis-wrap").hidden = true;
+  }
+
+  const resList = el("coord-results-list");
+  resList.innerHTML = "";
+  for (const res of data.agent_results || []) {
+    const item = document.createElement("div");
+    item.className = "coord-result-item";
+    const status = res.error ? `<span style="color:var(--muted)">Error: ${res.error}</span>` : `OK (exit ${res.exit_code})`;
+    item.innerHTML = `
+      <div class="coord-result-header">
+        <span class="coord-result-agent">${res.agent}@${res.node}</span>
+        <span class="coord-result-meta">${status}</span>
+      </div>
+      <div class="snippet">${escHtml(res.content || "(no response)")}</div>
+    `;
+    resList.appendChild(item);
+  }
+});
 
 async function connect(peer, btn) {
   btn.disabled = true;
@@ -526,6 +749,71 @@ async function pollDeliveries() {
     /* daemon may be down */
   }
 }
+
+// ── Threads view ─────────────────────────────────────────────────────────────
+
+async function refreshThreads() {
+  const { ok, data } = await api("/talk/threads");
+  if (!ok) return;
+  renderThreads(data.threads || []);
+}
+
+function renderThreads(threads) {
+  const ul = el("threads-list");
+  ul.innerHTML = "";
+  if (!threads.length) {
+    ul.innerHTML = '<li class="empty">No conversations yet.</li>';
+    return;
+  }
+  for (const t of threads) {
+    const li = document.createElement("li");
+    li.style.cursor = "pointer";
+    li.style.borderRadius = "0";
+    li.style.border = "none";
+    li.style.borderBottom = "1px solid var(--border)";
+    li.innerHTML = `
+      <div style="font-weight:600; font-size:0.85rem;">${t.local_agent} ↔ ${t.remote_agent}</div>
+      <div class="hint" style="font-size:0.75rem;">${t.remote_node} · ${relTime(t.updated)}</div>
+    `;
+    li.addEventListener("click", () => showThread(t));
+    ul.appendChild(li);
+  }
+}
+
+async function showThread(t) {
+  el("thread-title").textContent = `${t.local_agent} on this machine ↔ ${t.remote_agent} on ${t.remote_node}`;
+  const { ok, data } = await api(`/talk/threads/${t.id}`);
+  if (!ok) return;
+
+  const container = el("thread-messages");
+  container.innerHTML = "";
+  for (const m of data.messages || []) {
+    const div = document.createElement("div");
+    div.style.marginBottom = "1rem";
+    div.style.padding = "0.5rem";
+    div.style.borderRadius = "8px";
+    div.style.background = m.role === "assistant" ? "rgba(47, 129, 247, 0.1)" : "rgba(255, 255, 255, 0.05)";
+    
+    const header = document.createElement("div");
+    header.style.fontSize = "0.75rem";
+    header.style.color = "var(--muted)";
+    header.style.marginBottom = "0.25rem";
+    header.textContent = `[${new Date(m.ts * 1000).toLocaleTimeString()}] ${m.from_agent}@${m.from_node}:`;
+    
+    const body = document.createElement("div");
+    body.style.whiteSpace = "pre-wrap";
+    body.style.fontSize = "0.85rem";
+    body.textContent = m.content;
+    
+    div.appendChild(header);
+    div.appendChild(body);
+    container.appendChild(div);
+  }
+  container.scrollTop = container.scrollHeight;
+}
+
+document.querySelector('.nav-item[data-view="threads"]')?.addEventListener("click", refreshThreads);
+el("btn-threads-refresh")?.addEventListener("click", refreshThreads);
 
 // ── Tasks panel ──────────────────────────────────────────────────────────────
 

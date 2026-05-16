@@ -17,8 +17,10 @@
       <nav class="nav">
         <button type="button" class="nav-item active" data-view="dashboard">Dashboard</button>
         <button type="button" class="nav-item" data-view="agents">Agents</button>
+        <button type="button" class="nav-item" data-view="coordination">Coordination</button>
         <button type="button" class="nav-item" data-view="terminals">Terminals</button>
         <button type="button" class="nav-item" data-view="messages">Messages</button>
+        <button type="button" class="nav-item" data-view="threads">Threads</button>
         <button type="button" class="nav-item" data-view="tasks">Tasks</button>
         <button type="button" class="nav-item" data-view="skills">Skills</button>
         <button type="button" class="nav-item" data-view="settings">Settings</button>
@@ -47,9 +49,39 @@
             </ul>
           </article>
         </div>
+        <div class="grid two">
+          <article class="card">
+            <h3>SSH Presets</h3>
+            <p class="hint">Remote computers accessible via SSH.</p>
+            <ul id="ssh-hosts-list" class="nearby-list">
+              <li class="empty">No SSH presets yet.</li>
+            </ul>
+            <button type="button" id="btn-add-ssh" class="btn ghost small" style="margin-top:0.5rem">Add SSH Host</button>
+          </article>
+          <article class="card" id="ssh-form-card" hidden>
+            <h3>Add SSH Host</h3>
+            <div class="row" style="margin-bottom:0.5rem">
+              <label style="flex:1">Node name <input id="ssh-node" type="text" placeholder="e.g. WORKSTATION"></label>
+              <label style="flex:1">User <input id="ssh-user" type="text" placeholder="alice"></label>
+            </div>
+            <div class="row" style="margin-bottom:0.5rem">
+              <label style="flex:2">Host <input id="ssh-host" type="text" placeholder="10.0.0.5 or example.com"></label>
+              <label style="flex:1">Port <input id="ssh-port" type="number" value="22"></label>
+            </div>
+            <label>SSH Key Path (optional) <input id="ssh-key" type="text" placeholder="~/.ssh/id_ed25519"></label>
+            <div class="row">
+              <button type="button" id="btn-ssh-save" class="btn primary small">Test & Save</button>
+              <button type="button" id="btn-ssh-cancel" class="btn ghost small">Cancel</button>
+            </div>
+          </article>
+        </div>
         <article class="card" id="pending-card" hidden>
           <h3>Connection requests</h3>
           <ul id="pending-list"></ul>
+        </article>
+        <article class="card" id="ssh-pending-card" hidden>
+          <h3>SSH Drift / Suggestions</h3>
+          <ul id="ssh-pending-list" class="nearby-list"></ul>
         </article>
       </section>
 
@@ -94,6 +126,52 @@
         </article>
       </section>
 
+      <section id="view-coordination" class="view">
+        <header class="view-header">
+          <h2>Multi-Agent Coordination</h2>
+        </header>
+        <article class="card">
+          <p class="hint" style="margin-bottom: 1rem;">Fan a task out to multiple agents, collect results, and optionally synthesize them.</p>
+          
+          <label>Agents to involve
+            <div id="coord-agents-list" class="coord-agents-grid">
+              <!-- Dynamically populated checkboxes -->
+            </div>
+          </label>
+
+          <div class="row" style="margin-bottom: 1rem;">
+            <label style="flex: 1;">Mode
+              <select id="coord-mode">
+                <option value="parallel">Parallel (Faster)</option>
+                <option value="sequential">Sequential (Chain of thought)</option>
+              </select>
+            </label>
+            <label style="flex: 1;">Synthesizer agent (optional)
+              <select id="coord-synthesizer">
+                <option value="">None (Broadcast only)</option>
+              </select>
+            </label>
+          </div>
+
+          <label>Task description
+            <textarea id="coord-task" rows="4" placeholder="Describe the task for the group..."></textarea>
+          </label>
+
+          <button type="button" id="btn-coord-run" class="btn primary">Run Coordination</button>
+          <p class="hint" id="coord-status"></p>
+        </article>
+
+        <article class="card" id="coord-results-card" hidden>
+          <h3>Results</h3>
+          <div id="coord-synthesis-wrap" hidden>
+            <label>Synthesis</label>
+            <div id="coord-synthesis" class="snippet" style="max-height: none; margin-bottom: 1rem;"></div>
+          </div>
+          <label>Individual Responses</label>
+          <div id="coord-results-list" class="coord-results-list"></div>
+        </article>
+      </section>
+
       <section id="view-terminals" class="view">
         <header class="view-header">
           <h2>Terminals</h2>
@@ -120,6 +198,24 @@
         <article class="card">
           <pre id="inbox-log" class="inbox-log"></pre>
         </article>
+      </section>
+
+      <section id="view-threads" class="view">
+        <header class="view-header">
+          <h2>Conversation Threads</h2>
+          <button type="button" id="btn-threads-refresh" class="btn ghost">Refresh</button>
+        </header>
+        <div class="grid two" style="grid-template-columns: 300px 1fr;">
+          <article class="card" style="padding: 0; overflow: hidden; display: flex; flex-direction: column;">
+            <ul id="threads-list" class="agent-list" style="flex: 1; overflow-y: auto; margin: 0; border-radius: 0; border: none;">
+              <li class="empty">Loading threads…</li>
+            </ul>
+          </article>
+          <article class="card" id="thread-messages-card" style="display: flex; flex-direction: column; min-height: 400px;">
+            <h3 id="thread-title">Select a thread</h3>
+            <div id="thread-messages" class="inbox-log" style="flex: 1; max-height: none;"></div>
+          </article>
+        </div>
       </section>
 
       <section id="view-tasks" class="view">
