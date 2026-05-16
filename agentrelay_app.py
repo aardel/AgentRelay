@@ -195,6 +195,7 @@ class AgentRelayApp(tk.Tk):
         self.after(300, self.refresh)
         self.after(5000, self._tick)
         self.after(500, self._poll_deliveries)
+        self.after(1000, self._poll_inbox)
 
     def _apply_style(self) -> None:
         self.configure(bg="#f5f5f7")
@@ -334,6 +335,15 @@ class AgentRelayApp(tk.Tk):
             anchor=tk.E, pady=(4, 0))
 
         self._prompt_targets: list[dict] = []
+
+        # Inbox — shows messages arriving from remote peers
+        ib = ttk.LabelFrame(self, text="Messages received", style="Card.TLabelframe", padding=10)
+        ib.pack(fill=tk.X, **pad)
+        self.inbox_text = tk.Text(ib, height=5, wrap=tk.WORD,
+                                  font=("Segoe UI", 9), state=tk.DISABLED,
+                                  background="#f5f5f7", relief=tk.FLAT)
+        self.inbox_text.pack(fill=tk.X)
+        self._inbox_last_ts: float = 0.0
 
         self.footer = tk.StringVar()
         self._delivery_active = False
@@ -494,6 +504,39 @@ class AgentRelayApp(tk.Tk):
                 pass
         threading.Thread(target=_check, daemon=True).start()
         self.after(500, self._poll_deliveries)
+
+    def _poll_inbox(self) -> None:
+        """Poll /inbox every 2s and append new messages to the inbox panel."""
+        since = self._inbox_last_ts
+
+        def _check():
+            try:
+                import urllib.request, json as _json
+                url = f"http://127.0.0.1:{self.cfg.port}/inbox?since={since}"
+                with urllib.request.urlopen(url, timeout=2) as r:
+                    data = _json.loads(r.read())
+                msgs = data.get("messages") or []
+                if msgs:
+                    self.after(0, lambda m=msgs: self._append_inbox(m))
+            except Exception:
+                pass
+
+        threading.Thread(target=_check, daemon=True).start()
+        self.after(2000, self._poll_inbox)
+
+    def _append_inbox(self, msgs: list) -> None:
+        import time as _time
+        self.inbox_text.configure(state=tk.NORMAL)
+        for m in msgs:
+            ts = _time.strftime("%H:%M:%S", _time.localtime(m["ts"]))
+            header = f"[{ts}] {m['from']}: "
+            self.inbox_text.insert(tk.END, header, "bold")
+            self.inbox_text.insert(tk.END, m["command"] + "\n")
+            if m["ts"] > self._inbox_last_ts:
+                self._inbox_last_ts = m["ts"]
+        self.inbox_text.tag_configure("bold", font=("Segoe UI", 9, "bold"))
+        self.inbox_text.see(tk.END)
+        self.inbox_text.configure(state=tk.DISABLED)
 
     def _process_deliveries(self, items: list) -> None:
         for item in items:
