@@ -693,8 +693,10 @@ class AgentRelay:
     # ---- HTTP handlers ----
 
     def _auth(self, request: web.Request) -> bool:
-        return secrets.compare_digest(
-            request.headers.get("X-Agent-Token", ""), self.cfg.token)
+        supplied = request.headers.get("X-Agent-Token", "")
+        if not supplied:
+            supplied = request.rel_url.query.get("token", "")
+        return secrets.compare_digest(supplied, self.cfg.token)
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "node": self.cfg.node_name})
@@ -1227,7 +1229,7 @@ class AgentRelay:
           resize → resize PTY, requires write_token; viewers adjust client-side only
           close  → terminate session, requires write_token
 
-        Auth: X-Agent-Token header required (same token as all other endpoints).
+        Auth: X-Agent-Token header or ?token= query parameter required.
         """
         if not self._auth(request):
             return web.Response(status=401, text="unauthorized")

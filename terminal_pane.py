@@ -69,8 +69,8 @@ let sessionId  = SESSION || null;
 let connected  = false;
 
 function connect() {
-  ws = new WebSocket(`ws://127.0.0.1:${PORT}/terminal`,
-                     [], { headers: { "X-Agent-Token": TOKEN } });
+  ws = new WebSocket(
+    `ws://127.0.0.1:${PORT}/terminal?token=${encodeURIComponent(TOKEN)}`);
 
   ws.onopen = () => {
     connected = true;
