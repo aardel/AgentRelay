@@ -169,7 +169,15 @@ def agent_launch_script_name(adapter_name: str) -> str:
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    try:
+        asyncio.get_running_loop()
+        # Already inside a running event loop — run in a fresh thread to avoid
+        # the "asyncio.run() cannot be called from a running event loop" error.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(asyncio.run, coro).result()
+    except RuntimeError:
+        return asyncio.run(coro)
 
 
 async def _health(port: int) -> bool:
