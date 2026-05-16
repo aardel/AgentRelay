@@ -76,6 +76,28 @@
     return `ws://127.0.0.1:${port}/terminal?token=${encodeURIComponent(token)}`;
   }
 
+  const XTERM_THEME = {
+    background: "#1e1e1e",
+    foreground: "#d4d4d4",
+    cursor: "#d4d4d4",
+    black: "#1e1e1e",
+    red: "#f44747",
+    green: "#6a9955",
+    yellow: "#dcdcaa",
+    blue: "#569cd6",
+    magenta: "#c586c0",
+    cyan: "#4ec9b0",
+    white: "#d4d4d4",
+    brightBlack: "#808080",
+    brightRed: "#f44747",
+    brightGreen: "#6a9955",
+    brightYellow: "#dcdcaa",
+    brightBlue: "#569cd6",
+    brightMagenta: "#c586c0",
+    brightCyan: "#4ec9b0",
+    brightWhite: "#ffffff",
+  };
+
   function b64ToBytes(b64) {
     const bin = atob(b64);
     const out = new Uint8Array(bin.length);
@@ -242,11 +264,17 @@
     const wrap = document.createElement("div");
     wrap.className = "terminal-tab";
     wrap.setAttribute("role", "tab");
+    if (global.AgentRelayColors) {
+      global.AgentRelayColors.applyAgentColor(wrap, agent);
+    }
 
     const label = document.createElement("button");
     label.type = "button";
     label.className = "terminal-tab-label";
-    label.textContent = agent;
+    const swatch = document.createElement("span");
+    swatch.className = "agent-swatch";
+    label.appendChild(swatch);
+    label.appendChild(document.createTextNode(agent));
     label.title = `Show ${agent}`;
     label.addEventListener("click", () => activateTab(id));
 
@@ -271,7 +299,8 @@
       cursorBlink: true,
       fontSize: 13,
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-      theme: { background: "#1e1e1e" },
+      theme: XTERM_THEME,
+      allowTransparency: false,
     });
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);

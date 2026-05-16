@@ -243,6 +243,19 @@ class PTYRegistry:
                 return session
         return None
 
+    def list_active_agent_names(self) -> list[str]:
+        """Unique agent names with a live PTY session (order preserved)."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for session in self._sessions.values():
+            if not session.alive:
+                continue
+            if session.agent_name in seen:
+                continue
+            seen.add(session.agent_name)
+            out.append(session.agent_name)
+        return out
+
     def list(self) -> list[dict]:
         return [
             {

@@ -285,35 +285,48 @@ class Config:
         requested: str | None,
         *,
         prefer_interactive: bool = False,
+        active_agents: list[str] | None = None,
     ) -> str | None:
         """Resolve base agent names to configured adapter IDs.
 
         `prefer_interactive=True` is used by visible delivery paths, allowing
         a request for "gemini" to land in "gemini-interactive" when available.
         Background paths keep exact adapter behavior first.
+
+        When *active_agents* is non-empty, only adapters in that family are
+        returned so forwards do not spawn or retarget to a different agent.
         """
         if not requested:
+            return None
+
+        active = list(active_agents or [])
+        if active and not _agent_family_matches(requested, active):
             return None
 
         if prefer_interactive:
             exact = self.adapters.get(requested)
             if exact and exact.mode in INTERACTIVE_MODES:
-                return requested
+                if not active or _agent_family_matches(requested, active):
+                    return requested
             base = agent_base_name(requested)
             for candidate in (f"{base}-interactive", f"{base}-visible"):
                 spec = self.adapters.get(candidate)
                 if spec and spec.mode in INTERACTIVE_MODES:
-                    return candidate
+                    if not active or _agent_family_matches(candidate, active):
+                        return candidate
 
         if requested in self.adapters:
-            return requested
+            if not active or _agent_family_matches(requested, active):
+                return requested
 
         base = agent_base_name(requested)
         if base in self.adapters:
-            return base
+            if not active or _agent_family_matches(base, active):
+                return base
         for candidate in (f"{base}-interactive", f"{base}-visible"):
             if candidate in self.adapters:
-                return candidate
+                if not active or _agent_family_matches(candidate, active):
+                    return candidate
         return None
 
 
@@ -511,6 +524,20 @@ async def _on_session_closed(
     await _push_status_callback(reply_to, originator_task_id, status)
 
 
+def list_active_agent_names() -> list[str]:
+    """Agent adapter IDs that currently have a live embedded terminal."""
+    return pty_registry.list_active_agent_names()
+
+
+def _agent_family_matches(name: str, active: list[str]) -> bool:
+    if not active:
+        return True
+    if name in active:
+        return True
+    base = agent_base_name(name)
+    return any(agent_base_name(a) == base for a in active)
+
+
 def _find_pty_for_adapter(adapter_name: str) -> PTYSession | None:
     """Return an embedded GUI terminal session for this adapter, if running."""
     session = pty_registry.find_alive_by_agent(adapter_name)
@@ -549,6 +576,20 @@ async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
                 f"Delivered to embedded terminal for '{adapter.name}', "
                 f"sent after {wait_seconds}s."),
             "stderr": "",
+        }
+
+    active = list_active_agent_names()
+    if active and not _agent_family_matches(adapter.name, active):
+        active_text = ", ".join(active)
+        return {
+            "status": "error",
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": (
+                f"Agent '{adapter.name}' is not running on this computer. "
+                f"Open that agent's terminal first, or send to: {active_text}"
+            ),
+            "active_agents": active,
         }
 
     # Derive a window title fragment: explicit config > first word of command
@@ -620,29 +661,6 @@ async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
                         import pygetwindow as gw
                         matches = [w for w in gw.getAllWindows()
                                    if title_hint in w.title.lower()]
-                        if not matches:
-                            # Title hint not found — locate Windows Terminal by
-                            # process name so messages reach the right window
-                            # even when the tab title is dynamic.
-                            try:
-                                out = subprocess.check_output(
-                                    ["powershell", "-NoProfile", "-Command",
-                                     "(Get-Process WindowsTerminal"
-                                     " -ErrorAction SilentlyContinue).Id"],
-                                    text=True, timeout=3,
-                                ).strip()
-                                pids = {int(p) for p in out.splitlines()
-                                        if p.strip().isdigit()}
-                                GetWTPI = ctypes.windll.user32.GetWindowThreadProcessId
-                                for w in gw.getAllWindows():
-                                    if not w.title:
-                                        continue
-                                    pid = ctypes.wintypes.DWORD()
-                                    GetWTPI(w._hWnd, ctypes.byref(pid))
-                                    if pid.value in pids:
-                                        matches.append(w)
-                            except Exception:
-                                pass
                         if matches:
                             matches[0].activate()
                             time.sleep(0.4)
@@ -705,6 +723,7 @@ class Peer:
     address: str
     port: int
     agents: str = ""
+    active_agents: str = ""
     last_seen: float = field(default_factory=time.time)
 
 
@@ -713,9 +732,10 @@ class PeerRegistry:
         self.peers: dict[str, Peer] = {}
 
     def upsert(self, name: str, addr: str, port: int,
-               agents: str = "") -> None:
+               agents: str = "", active_agents: str = "") -> None:
         self.peers[name] = Peer(
-            name=name, address=addr, port=port, agents=agents)
+            name=name, address=addr, port=port,
+            agents=agents, active_agents=active_agents)
         log.info("peer up: %s @ %s:%d", name, addr, port)
 
     def remove(self, name: str) -> None:
@@ -731,6 +751,7 @@ class PeerRegistry:
                 "address": p.address,
                 "port": p.port,
                 "agents": p.agents,
+                "active_agents": p.active_agents,
                 "connected": p.name in trusted,
                 "last_seen": p.last_seen,
             }
@@ -763,17 +784,32 @@ class AgentRelay:
         return {
             "agents": available_agent_labels(self.cfg),
             "agents_missing": unavailable_agent_labels(self.cfg),
+            "active_agents": list_active_agent_names(),
+        }
+
+    def _peer_announcement_payload(self) -> dict[str, Any]:
+        from relay_client import is_adapter_available
+
+        installed = ",".join(
+            name for name, spec in self.cfg.adapters.items()
+            if is_adapter_available(name, spec)
+        )
+        active = ",".join(list_active_agent_names())
+        return {
+            "node": self.cfg.node_name,
+            "address": self._local_ip(),
+            "port": self.cfg.port,
+            "agents": installed,
+            "active_agents": active,
+            "machine_id": get_machine_id(),
         }
 
     async def register_mdns(self) -> None:
         self.azc = AsyncZeroconf(ip_version=IPVersion.V4Only)
         addresses = [socket.inet_aton(self._local_ip())]
-        from relay_client import is_adapter_available
-
-        agent_ids = ",".join(
-            name for name, spec in self.cfg.adapters.items()
-            if is_adapter_available(name, spec)
-        )
+        payload = self._peer_announcement_payload()
+        agent_ids = payload["agents"]
+        active_ids = payload["active_agents"]
         self.service_info = ServiceInfo(
             type_=SERVICE_TYPE,
             name=f"{self.cfg.node_name}.{SERVICE_TYPE}",
@@ -783,6 +819,7 @@ class AgentRelay:
                 "node": self.cfg.node_name,
                 "version": "0.2.0",
                 "agents": agent_ids,
+                "active": active_ids,
             },
             server=f"{self.cfg.node_name}.local.",
         )
@@ -825,20 +862,14 @@ class AgentRelay:
             return  # ourselves
         addrs = info.parsed_scoped_addresses()
         agents = info.properties.get(b"agents", b"").decode()
+        active = info.properties.get(b"active", b"").decode()
         if addrs:
-            self.peers.upsert(node, addrs[0], info.port, agents=agents)
+            self.peers.upsert(
+                node, addrs[0], info.port, agents=agents, active_agents=active)
 
     async def _announce_to_peer(self, addr: str, port: int) -> None:
         """Tell a specific peer our address so they keep us in their registry."""
-        local_ip = self._local_ip()
-        agent_ids = ",".join(self.cfg.adapters.keys())
-        payload = {
-            "node": self.cfg.node_name,
-            "address": local_ip,
-            "port": self.cfg.port,
-            "agents": agent_ids,
-            "machine_id": get_machine_id(),
-        }
+        payload = self._peer_announcement_payload()
         url = f"http://{addr}:{port}/peer-announce"
         try:
             async with aiohttp.ClientSession() as s:
@@ -904,9 +935,11 @@ class AgentRelay:
         addr = body.get("address", request.remote)
         port = int(body.get("port", 9876))
         agents = body.get("agents", "")
+        active_agents = body.get("active_agents", "")
         machine_id = body.get("machine_id", "")
         if node and node != self.cfg.node_name:
-            self.peers.upsert(node, addr, port, agents=agents)
+            self.peers.upsert(
+                node, addr, port, agents=agents, active_agents=active_agents)
             store = get_ssh_store()
             existing_by_id = store.get_by_machine_id(machine_id) if machine_id else None
             existing_by_name = store.get(node)
@@ -962,6 +995,7 @@ class AgentRelay:
             "node": self.cfg.node_name,
             "port": self.cfg.port,
             "adapters": adapters,
+            "active_agents": list_active_agent_names(),
             "rules": [r.__dict__ for r in self.cfg.rules],
         })
 
@@ -997,8 +1031,9 @@ class AgentRelay:
         from_node = body.get("from_node", "unknown")
         from_agent = body.get("from_agent", "")
         requested_agent = body.get("to_agent") or self.cfg.default_agent
+        active = list_active_agent_names()
         to_agent = self.cfg.resolve_adapter_name(
-            requested_agent, prefer_interactive=True)
+            requested_agent, prefer_interactive=True, active_agents=active or None)
         message = (body.get("message") or "").strip()
         originator_task_id: str | None = body.get("task_id")
         # Prefer explicit reply_to; fall back to deriving from request.remote so
@@ -1012,6 +1047,17 @@ class AgentRelay:
         if not message:
             return web.json_response({"error": "missing message"}, status=400)
         if not to_agent:
+            if active:
+                return web.json_response({
+                    "ok": False,
+                    "error": (
+                        f"Agent '{requested_agent}' is not running on "
+                        f"{self.cfg.node_name}. Active terminals: "
+                        f"{', '.join(active)}"
+                    ),
+                    "requested_agent": requested_agent,
+                    "active_agents": active,
+                }, status=200)
             return web.json_response(
                 {"error": f"unknown agent: {requested_agent}"}, status=400)
 

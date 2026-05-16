@@ -608,23 +608,6 @@ class AgentRelayApp(tk.Tk):
                 import pygetwindow as gw
                 matches = [w for w in gw.getAllWindows()
                            if title_hint in w.title.lower()]
-                if not matches:
-                    # Fall back to any WindowsTerminal window
-                    out = subprocess.check_output(
-                        ["powershell", "-NoProfile", "-Command",
-                         "(Get-Process WindowsTerminal"
-                         " -ErrorAction SilentlyContinue).Id"],
-                        text=True, timeout=3,
-                    ).strip()
-                    pids = {int(p) for p in out.splitlines() if p.strip().isdigit()}
-                    GetPID = ctypes.windll.user32.GetWindowThreadProcessId
-                    for w in gw.getAllWindows():
-                        if not w.title:
-                            continue
-                        pid = ctypes.wintypes.DWORD()
-                        GetPID(w._hWnd, ctypes.byref(pid))
-                        if pid.value in pids:
-                            matches.append(w)
                 if matches:
                     hwnd = matches[0]._hWnd
             except Exception:

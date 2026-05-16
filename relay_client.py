@@ -667,6 +667,26 @@ def _agent_base(agent: str) -> str:
     return agent
 
 
+def _parse_active_agents(info: dict) -> list[str]:
+    raw = info.get("active_agents")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [a.strip() for a in raw.split(",") if a.strip()]
+    if isinstance(raw, list):
+        return [str(a).strip() for a in raw if str(a).strip()]
+    return []
+
+
+def _peer_agent_family_active(name: str, active: list[str]) -> bool:
+    if not active:
+        return True
+    if name in active:
+        return True
+    base = _agent_base(name)
+    return any(_agent_base(a) == base for a in active)
+
+
 def resolve_peer_agent_from_info(
     info: dict,
     requested_agent: str,
@@ -677,8 +697,30 @@ def resolve_peer_agent_from_info(
     advertises one, so `agent-send gemini@MAC ...` reaches the visible session.
     Exact interactive names remain exact. If no sibling exists, fall back to the
     requested adapter.
+
+    When the peer reports *active_agents*, resolution is limited to agents
+    that currently have an open terminal so sends do not retarget elsewhere.
     """
     adapters = info.get("adapters") or {}
+    active = _parse_active_agents(info)
+
+    if active:
+        if requested_agent in active:
+            spec = adapters.get(requested_agent) or {}
+            return requested_agent, spec.get("mode")
+        base = _agent_base(requested_agent)
+        for candidate in (
+            f"{base}-interactive",
+            f"{base}-visible",
+            requested_agent,
+            base,
+        ):
+            if candidate in active:
+                spec = adapters.get(candidate) or {}
+                return candidate, spec.get("mode")
+        spec = adapters.get(requested_agent) or {}
+        return requested_agent, spec.get("mode")
+
     exact = adapters.get(requested_agent) or {}
     exact_mode = exact.get("mode")
     if _looks_interactive(requested_agent, exact_mode):
@@ -696,10 +738,9 @@ def resolve_peer_agent_from_info(
     return requested_agent, exact_mode
 
 
-async def _fetch_peer_adapter_resolution(
-    cfg: Config, addr: str, port: int, agent: str,
-) -> tuple[str, str | None]:
-    """Return resolved adapter name and mode from peer /info."""
+async def _fetch_peer_info(
+    cfg: Config, addr: str, port: int,
+) -> dict | None:
     try:
         t = aiohttp.ClientTimeout(total=3)
         async with aiohttp.ClientSession(timeout=t) as session:
@@ -708,18 +749,29 @@ async def _fetch_peer_adapter_resolution(
                 headers={"X-Agent-Token": cfg.token},
             ) as resp:
                 if resp.status != 200:
-                    return agent, None
-                info = await resp.json()
-        return resolve_peer_agent_from_info(info, agent)
+                    return None
+                return await resp.json()
     except Exception:
-        return agent, None
+        return None
+
+
+async def _fetch_peer_adapter_resolution(
+    cfg: Config, addr: str, port: int, agent: str,
+) -> tuple[str, str | None, dict | None]:
+    """Return resolved adapter name, mode, and peer /info payload."""
+    info = await _fetch_peer_info(cfg, addr, port)
+    if not info:
+        return agent, None, None
+    resolved, mode = resolve_peer_agent_from_info(info, agent)
+    return resolved, mode, info
 
 
 async def _fetch_peer_adapter_mode(
     cfg: Config, addr: str, port: int, agent: str,
 ) -> str | None:
     """Return adapter mode from peer /info, or None if unavailable."""
-    _resolved, mode = await _fetch_peer_adapter_resolution(cfg, addr, port, agent)
+    _resolved, mode, _info = await _fetch_peer_adapter_resolution(
+        cfg, addr, port, agent)
     return mode
 
 
@@ -788,8 +840,15 @@ def deliver_to_peer(
     """
     if not agent:
         return send_to_peer(cfg, addr, port, message, agent)
-    resolved_agent, mode = _run(
+    resolved_agent, mode, info = _run(
         _fetch_peer_adapter_resolution(cfg, addr, port, agent))
+    active = _parse_active_agents(info or {})
+    if active and not _peer_agent_family_active(resolved_agent, active):
+        active_text = ", ".join(active)
+        return False, (
+            f"Agent '{agent}' is not running on the remote computer. "
+            f"Active terminals: {active_text}"
+        )
     if _looks_interactive(resolved_agent, mode):
         return forward_to_peer(cfg, addr, port, message, resolved_agent,
                                task_id=task_id, reply_to=reply_to)

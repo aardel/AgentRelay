@@ -154,9 +154,16 @@ function renderAgents(agents, agentsMissing) {
 
   for (const a of agents) {
     const li = document.createElement("li");
+    li.className = "agent-card";
+    const style = window.AgentRelayColors?.applyAgentColor(li, a.id) || {};
     const kind = a.mode === "visible" ? "Interactive" : "Background";
     const extra = a.role ? ` · ${a.role}` : "";
-    li.innerHTML = `<strong>${a.label || a.id}</strong><br><span class="hint">${kind}${extra} · ready</span>`;
+    li.innerHTML = `
+      <div class="agent-card-head">
+        <span class="agent-swatch" style="background:${style.color}"></span>
+        <strong class="agent-name">${a.label || a.id}</strong>
+      </div>
+      <span class="hint">${kind}${extra} · ready</span>`;
     ul.appendChild(li);
 
     for (const select of [launch, termAgent]) {
@@ -169,9 +176,16 @@ function renderAgents(agents, agentsMissing) {
 
   for (const a of agentsMissing) {
     const li = document.createElement("li");
+    li.className = "agent-card agent-card-missing";
+    const style = window.AgentRelayColors?.applyAgentColor(li, a.id) || {};
     const kind = a.mode === "visible" ? "Interactive" : "Background";
     const reason = a.reason || "not on PATH";
-    li.innerHTML = `<strong>${a.label || a.id}</strong><br><span class="hint">${kind} · not installed (${reason})</span>`;
+    li.innerHTML = `
+      <div class="agent-card-head">
+        <span class="agent-swatch" style="background:${style.color}"></span>
+        <strong class="agent-name">${a.label || a.id}</strong>
+      </div>
+      <span class="hint">${kind} · not installed (${reason})</span>`;
     li.style.opacity = "0.65";
     ul.appendChild(li);
   }
@@ -186,14 +200,19 @@ function renderNearby(list) {
   }
   for (const p of list) {
     const li = document.createElement("li");
-    const agents = Array.isArray(p.agents)
-      ? p.agents.join(", ")
-      : String(p.agents || "").replace(/,/g, ", ");
+    const running = parseAgentCsv(p.active_agents);
+    const installed = installedAgentsFromPeer(p);
+    let meta = "Agent relay";
+    if (running.length) {
+      meta = `Running: ${running.join(", ")}`;
+    } else if (installed.length) {
+      meta = `Installed: ${installed.join(", ")}`;
+    }
     li.innerHTML = `
       <div class="peer-row">
         <div>
           <div class="peer-name">${p.name}</div>
-          <div class="peer-meta">${agents || "Agent relay"}</div>
+          <div class="peer-meta">${meta}</div>
         </div>
         <div>
           ${p.connected
@@ -208,19 +227,30 @@ function renderNearby(list) {
   });
 }
 
+function parseAgentCsv(value) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  return String(value || "").split(",").map((a) => a.trim()).filter(Boolean);
+}
+
 function agentListFromPeer(peer) {
-  if (Array.isArray(peer.agents)) return peer.agents;
-  return String(peer.agents || "").split(",").map((a) => a.trim()).filter(Boolean);
+  const active = parseAgentCsv(peer.active_agents);
+  if (active.length) return active;
+  return parseAgentCsv(peer.agents);
+}
+
+function installedAgentsFromPeer(peer) {
+  return parseAgentCsv(peer.agents);
 }
 
 function renderSendTargets(data) {
   const targetSelect = el("send-target");
   const localAgents = (data.agents || []).map((a) => a.id).filter(Boolean);
+  const localActive = parseAgentCsv(data.active_agents);
   sendTargets = [{
     name: `This computer (${data.node || "local"})`,
     address: "127.0.0.1",
     port: data.port || API_PORT,
-    agents: localAgents,
+    agents: localActive.length ? localActive : localAgents,
     local: true,
   }];
   for (const peer of data.nearby || []) {
@@ -252,12 +282,16 @@ function renderSendAgents() {
   const selected = sendTargets.find((t) => t.name === el("send-target").value);
   const agents = selected ? selected.agents : [];
   const agentSelect = el("send-agent");
+  const previous = agentSelect.value;
   agentSelect.innerHTML = "";
   for (const agent of agents) {
     const option = document.createElement("option");
     option.value = agent;
     option.textContent = agent;
     agentSelect.appendChild(option);
+  }
+  if (agents.includes(previous)) {
+    agentSelect.value = previous;
   }
 }
 
@@ -494,8 +528,9 @@ function refreshCoordAgents(data) {
     const val = `${item.agent}@${item.node}`;
     const div = document.createElement("div");
     div.className = "coord-agent-item";
+    window.AgentRelayColors?.applyAgentColor(div, item.agent);
     const isChecked = checked.has(val) ? "checked" : "";
-    div.innerHTML = `<label><input type="checkbox" value="${val}" ${isChecked}> ${item.label}</label>`;
+    div.innerHTML = `<label><input type="checkbox" value="${val}" ${isChecked}> <span class="agent-swatch"></span> ${item.label}</label>`;
     list.appendChild(div);
 
     if (item.node === data.node) {
@@ -1158,8 +1193,9 @@ async function refreshResumes() {
   }
   for (const agent of agents) {
     const li = document.createElement("li");
-    li.textContent = agent;
-    li.className = selectedResumeAgent === agent ? "active" : "";
+    li.className = selectedResumeAgent === agent ? "active agent-card" : "agent-card";
+    window.AgentRelayColors?.applyAgentColor(li, agent);
+    li.innerHTML = `<span class="agent-swatch"></span> <span class="agent-name">${agent}</span>`;
     li.style.cursor = "pointer";
     li.style.borderRadius = "0";
     li.style.border = "none";
