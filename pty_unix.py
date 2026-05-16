@@ -21,6 +21,8 @@ if sys.platform == "win32":
 
 import pty  # stdlib
 
+from pty_env import build_pty_env
+
 
 class PtyUnix:
     """
@@ -54,8 +56,7 @@ class PtyUnix:
         self._master_fd = master_fd
         self._set_winsize(master_fd, self.cols, self.rows)
 
-        env = {**os.environ, "TERM": "xterm-256color",
-               "COLUMNS": str(self.cols), "LINES": str(self.rows)}
+        env = build_pty_env(self.cols, self.rows)
         self._proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,

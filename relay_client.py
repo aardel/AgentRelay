@@ -49,13 +49,24 @@ Send a message to the {label} agent via AgentRelay.
 
 The message to send is: $ARGUMENTS
 
-## Steps
+## Replying to a forwarded message
+
+If your current context contains a message that starts with
+`[Forwarded from <agent> on <node>]`, you are replying to that agent.
+Send directly to `<agent>@<node>` — skip the list step entirely.
+
+Example: `[Forwarded from claude-interactive on Aarons-MacBook-Air-2-2]`
+→ send to `claude-interactive@Aarons-MacBook-Air-2-2`
+
+## Steps (for new messages, not replies)
 
 1. Run: `{python} "{send}" --config "{cfg}" --list`
-   Find a node with `{interactive}` in its agents. This machine is marked `*`
-   and can be addressed as `local`.
-   - Multiple nodes with {label}? Ask: "Which computer? [list]"
-   - No node has `{interactive}`? Fall back to `{agent_key}` (headless).
+   Check the `active (running)` column — prefer a node where `{interactive}`
+   (or `{agent_key}`) appears as active. The `agents (configured)` column shows
+   all adapters that *could* run, not what is currently running.
+   This machine is marked `*` and can be addressed as `local`.
+   - Multiple active nodes with {label}? Ask: "Which computer? [list]"
+   - No node has `{interactive}` active? Fall back to `{agent_key}` (headless).
 
 2. Send: `{python} "{send}" --config "{cfg}" {interactive}@<node> "<message>"`
    Use `{interactive}@local` for this computer.
@@ -74,17 +85,24 @@ Send a message to any local or connected agent via AgentRelay.
 
 The message to send is: $ARGUMENTS
 
-## Steps
+## Replying to a forwarded message
+
+If your current context contains a message that starts with
+`[Forwarded from <agent> on <node>]`, you are replying to that agent.
+Send directly to `<agent>@<node>` — skip the list step entirely.
+
+## Steps (for new messages, not replies)
 
 1. Run: `{python} "{send}" --config "{cfg}" --list`
    Note available nodes and agents. This machine is marked `*` and can be
-   addressed as `local`.
+   addressed as `local`. Check the `active (running)` column — prefer agents
+   shown there over those only in `agents (configured)`.
 
 2. Determine target node and agent from $ARGUMENTS (e.g. "fix bug --to WINPC --agent codex").
    Otherwise:
    - One peer → use it.
    - Multiple peers → ask: "Which computer? [list]"
-   - Multiple agents on chosen peer → ask: "Which agent? [list]"
+   - Multiple agents on chosen peer → prefer active ones; ask if still ambiguous.
    - Prefer `*-interactive` adapters for visible delivery.
 
 3. Send: `{python} "{send}" --config "{cfg}" <agent>@<node> "<message>"`
@@ -101,10 +119,21 @@ The message to send is: $ARGUMENTS
         return f"""\
 List all connected computers and their available agents via AgentRelay.
 
+## How to run
+
 Run: `{python} "{send}" --config "{cfg}" --list`
 
-Show results clearly: mark this machine with `*`, list agents on each node,
-and suggest `agent@node` commands such as `codex@local` or `claude@MAC`.
+Then show the results clearly, marking which machine is the current one (`*`)
+and listing the agents configured on each peer from the AgentRelay config.
+Suggest the right `/relay-*` skill to use for each agent.
+
+## Reading the output
+
+- `agents (configured)` — all adapters that *could* be started on that machine.
+- `active (running)` — adapters that have a live PTY session right now.
+
+When sending to a peer, prefer an agent shown in `active (running)`.
+If `active` is empty, any configured agent can be started.
 """
 
     return {
