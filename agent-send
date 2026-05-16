@@ -121,15 +121,49 @@ async def discover(timeout: float = 2.0) -> dict[str, tuple[str, int]]:
     return results
 
 
+async def discover_from_daemon(cfg: dict[str, Any]) -> dict[str, dict]:
+    """Query the local daemon's heartbeat-maintained peer registry.
+
+    Returns {node_name: {"address": str, "port": int, "agents": str}}.
+    Fast (no mDNS scan) and includes peers added via /peer-announce heartbeat.
+    """
+    port = int(cfg.get("port") or 9876)
+    token = cfg.get("token", "")
+    try:
+        timeout = aiohttp.ClientTimeout(total=2)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"http://127.0.0.1:{port}/peers",
+                headers={"X-Agent-Token": token},
+            ) as resp:
+                data = await resp.json()
+        return {
+            p["name"]: {"address": p["address"], "port": p["port"],
+                        "agents": p.get("agents", "")}
+            for p in data.get("peers", [])
+        }
+    except Exception:
+        return {}
+
+
 async def cmd_list(cfg: dict[str, Any] | None = None,
                    self_name: str | None = None) -> int:
-    peers = await discover(timeout=2.5)
     cfg = cfg or {}
     configured_agents = ",".join((cfg.get("adapters") or {}).keys())
-    if cfg:
-        local_name = cfg.get("node_name") or socket.gethostname().split(".")[0]
-        local_port = int(cfg.get("port") or 9876)
-        peers = {**peers, local_name: ("127.0.0.1", local_port)}
+    local_name = cfg.get("node_name") or socket.gethostname().split(".")[0]
+    local_port = int(cfg.get("port") or 9876)
+
+    daemon_peers = await discover_from_daemon(cfg)
+    mdns_peers = await discover(timeout=2.5)
+
+    # Build unified peer map: mDNS base, daemon values take priority
+    peers: dict[str, tuple[str, int]] = {**mdns_peers}
+    peer_agents: dict[str, str] = {}
+    for name, info in daemon_peers.items():
+        peers[name] = (info["address"], info["port"])
+        peer_agents[name] = info["agents"]
+    peers[local_name] = ("127.0.0.1", local_port)
+
     if not peers:
         print("no peers discovered")
         return 1
@@ -138,15 +172,25 @@ async def cmd_list(cfg: dict[str, Any] | None = None,
     print(f"{'-' * 20}  {'-' * 16}  {'-' * 6}  {'-' * 24}  -----")
     for node, (addr, port) in sorted(peers.items()):
         marker = "*" if node == me else ""
-        agents = configured_agents if node == me else ""
+        if node == me:
+            agents = configured_agents
+        else:
+            agents = peer_agents.get(node, "")
         print(f"{node:<20}  {addr:<16}  {port:<6}  {agents:<24}  {marker}")
     return 0
 
 
 async def cmd_broadcast(token: str, message: str, agent: str | None,
-                        self_name: str | None = None) -> int:
+                        self_name: str | None = None,
+                        cfg: dict[str, Any] | None = None) -> int:
     """Send message to all discovered peers in parallel — fire and forget."""
-    peers = await discover(timeout=2.5)
+    daemon_peers = await discover_from_daemon(cfg or {})
+    peers: dict[str, tuple[str, int]] = {
+        name: (info["address"], info["port"])
+        for name, info in daemon_peers.items()
+    }
+    if not peers:
+        peers = await discover(timeout=2.5)
     me = self_name or socket.gethostname().split(".")[0]
     targets = {name: addr for name, addr in peers.items() if name != me}
     if not targets:
@@ -219,7 +263,14 @@ async def cmd_send(token: str, target: str, command: str,
                    cfg: dict[str, Any] | None = None,
                    self_name: str | None = None) -> int:
     cfg = cfg or {}
-    peers = await discover(timeout=2.5)
+    # Use daemon registry first (instant, heartbeat-maintained); fall back to mDNS
+    daemon_peers = await discover_from_daemon(cfg)
+    peers: dict[str, tuple[str, int]] = {
+        name: (info["address"], info["port"])
+        for name, info in daemon_peers.items()
+    }
+    if target not in peers and not is_local_target(target, cfg):
+        peers = await discover(timeout=2.5)
     if target not in peers and not is_local_target(target, cfg):
         print(f"peer not found: {target}", file=sys.stderr)
         if peers:
@@ -303,7 +354,8 @@ def main() -> None:
         if not args.command:
             p.error("command required for --broadcast")
         sys.exit(asyncio.run(cmd_broadcast(
-            token, args.command, args.agent, self_name=node_name)))
+            token, args.command, args.agent, self_name=node_name,
+            cfg=cfg_data)))
 
     if args.local:
         if not args.command:
