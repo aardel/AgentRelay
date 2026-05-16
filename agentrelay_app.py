@@ -411,11 +411,11 @@ class AgentRelayApp(tk.Tk):
             agent_id = self._agent_ids[idx]
         except (ValueError, IndexError):
             return
-        if sys.platform != "win32":
-            self.footer.set("Terminal pane: Windows only in this build")
-            return
         try:
-            from terminal_pane import open_terminal
+            if sys.platform == "win32":
+                from terminal_pane import open_terminal
+            else:
+                from terminal_pane_unix import open_terminal
             self.cfg = Config.load(self.config_path)
             open_terminal(agent_id, self.cfg.port, self.cfg.token)
             self.footer.set(f"Opening terminal for '{agent_id}'…")
