@@ -196,6 +196,36 @@
     if (ctxMenu) ctxMenu.style.display = "none";
   }
 
+  function selectWordAtMouse(term, clientX, clientY) {
+    if (!term.element) return;
+    const rect = term.element.getBoundingClientRect();
+    const cellW = rect.width / term.cols;
+    const cellH = rect.height / term.rows;
+    const col = Math.floor((clientX - rect.left) / cellW);
+    const row = Math.floor((clientY - rect.top) / cellH);
+    if (row < 0 || row >= term.rows || col < 0 || col >= term.cols) return;
+
+    const bufRow = term.buffer.active.viewportY + row;
+    const line = term.buffer.active.getLine(bufRow);
+    if (!line) return;
+
+    const text = line.translateToString(true);
+    if (!text) return;
+
+    const safeCol = Math.min(col, text.length - 1);
+    if (safeCol < 0) return;
+
+    // Only select if we landed on a non-space character
+    if (!/\S/.test(text[safeCol])) return;
+
+    let start = safeCol;
+    while (start > 0 && /\S/.test(text[start - 1])) start--;
+    let end = safeCol;
+    while (end < text.length - 1 && /\S/.test(text[end + 1])) end++;
+
+    term.select(start, bufRow, end - start + 1);
+  }
+
   function openTerminal(agent, port, token, options) {
     options = options || {};
     const sessionId = options.sessionId || null;
@@ -237,11 +267,6 @@
     const panel = document.createElement("div");
     panel.className = "terminal-panel";
     panel.id = `panel-${id}`;
-    panel.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      showContextMenu(e.clientX, e.clientY);
-    });
-
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 13,
@@ -251,6 +276,12 @@
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(panel);
+
+    panel.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (!term.getSelection()) selectWordAtMouse(term, e.clientX, e.clientY);
+      showContextMenu(e.clientX, e.clientY);
+    });
 
     tabs.set(id, { wrap, panel, term, fitAddon, ws: null, agent, sessionId: null });
     tabsEl().appendChild(wrap);
