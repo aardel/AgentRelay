@@ -139,7 +139,8 @@ async def discover_from_daemon(cfg: dict[str, Any]) -> dict[str, dict]:
                 data = await resp.json()
         return {
             p["name"]: {"address": p["address"], "port": p["port"],
-                        "agents": p.get("agents", "")}
+                        "agents": p.get("agents", ""),
+                        "active_agents": p.get("active_agents", "")}
             for p in data.get("peers", [])
         }
     except Exception:
@@ -177,9 +178,13 @@ async def cmd_list(cfg: dict[str, Any] | None = None,
     # Build unified peer map: mDNS base, daemon values take priority
     peers: dict[str, tuple[str, int]] = {**mdns_peers}
     peer_agents: dict[str, str] = {}
+    peer_active: dict[str, list[str]] = {}
     for name, info in daemon_peers.items():
         peers[name] = (info["address"], info["port"])
         peer_agents[name] = info["agents"]
+        broadcast = info.get("active_agents", "")
+        if broadcast:
+            peer_active[name] = [a.strip() for a in broadcast.split(",") if a.strip()]
     peers[local_name] = ("127.0.0.1", local_port)
 
     if not peers:
@@ -187,14 +192,16 @@ async def cmd_list(cfg: dict[str, Any] | None = None,
         return 1
     me = self_name or socket.gethostname().split(".")[0]
 
-    # Fetch active PTY sessions from all nodes in parallel
+    # Fetch active PTY sessions from all nodes in parallel; fall back to
+    # heartbeat-broadcast active_agents when the direct /info call fails
+    # (e.g. token mismatch between machines).
     node_list = sorted(peers.keys())
     active_results = await asyncio.gather(
         *[_fetch_active_sessions(peers[n][0], peers[n][1], token) for n in node_list],
         return_exceptions=True,
     )
     active_by_node: dict[str, list[str]] = {
-        node: (res if isinstance(res, list) else [])
+        node: (res if isinstance(res, list) and res else peer_active.get(node, []))
         for node, res in zip(node_list, active_results)
     }
 
