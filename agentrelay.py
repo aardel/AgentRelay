@@ -36,6 +36,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -64,6 +65,55 @@ log = logging.getLogger("agentrelay")
 # and can focus windows reliably (unlike the daemon, which can't when
 # Chrome Remote Desktop or another remote session holds focus).
 _gui_delivery_queue: list[dict] = []
+
+
+def pid_file_path() -> Path:
+    return Path(tempfile.gettempdir()) / "agentrelay.pid"
+
+
+def pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if platform.system() == "Windows":
+        if pid == os.getpid():
+            return True
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0 and str(pid) in result.stdout
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def acquire_pid_lock(pid_file: Path) -> bool:
+    while True:
+        try:
+            fd = os.open(pid_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        except FileExistsError:
+            try:
+                existing_pid = int(pid_file.read_text().strip())
+            except ValueError:
+                pid_file.unlink(missing_ok=True)
+                continue
+            if pid_is_running(existing_pid):
+                return False
+            pid_file.unlink(missing_ok=True)
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+        return True
 
 
 # ============================================================
@@ -1248,21 +1298,10 @@ def main() -> None:
         log.error("weak or placeholder token in %s. edit it first.", args.config)
         sys.exit(1)
 
-    pid_file = Path("/tmp/agentrelay.pid")
-    if pid_file.exists():
-        try:
-            existing_pid = int(pid_file.read_text().strip())
-            os.kill(existing_pid, 0)
-            log.error(
-                "agentrelay already running as PID %d — exiting. "
-                "Kill it first or remove %s.",
-                existing_pid, pid_file,
-            )
-            sys.exit(1)
-        except (ProcessLookupError, ValueError):
-            pid_file.unlink(missing_ok=True)
-
-    pid_file.write_text(str(os.getpid()))
+    pid_file = pid_file_path()
+    if not acquire_pid_lock(pid_file):
+        log.error("agentrelay already running; lock file: %s", pid_file)
+        sys.exit(1)
     atexit.register(pid_file.unlink, missing_ok=True)
 
     try:
