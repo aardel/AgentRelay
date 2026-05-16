@@ -59,13 +59,16 @@ agentrelay-gui
 
 | Feature | What it does |
 |---------|----------------|
-| **Launch** | PTY terminal + start agent CLI + paste AgentRelay instructions |
+| **Home** | This computer, network peers, SSH connections |
+| **Launch** | Start an agent in a live terminal with AgentRelay instructions |
 | **Terminal only** | Blank terminal tab (no auto-start) |
-| **YOLO mode** | Checkbox — full-auto permission profile (see below) |
-| **Skills** | Install Codex skills or `/relay-send`, `/relay-codex`, etc. slash commands into your agent |
-| **Terminals** | Multiple tabs; click **×** to close a tab |
-| **Messages** | Incoming work from remote peers |
-| **Tasks** | Live task queue — status, duration, and terminal attach for every routed task |
+| **Freedom level** | Careful / Project helper / Full auto when launching |
+| **Extra commands** | Install `/relay-send`, Codex skills, etc. |
+| **Live terminals** | Multiple tabs; click **×** to close |
+| **Inbox** | Messages from other computers |
+| **Activity** | Running jobs — status, time, **Open** terminal |
+| **Agent notes** | Bio + remembered facts per agent |
+| **Group task** | One job to several agents |
 
 ### Permission profiles
 
@@ -77,15 +80,17 @@ Three tiers control agent autonomy, selectable per launch or via `--profile` on 
 | `project_write` | Edit current project; approvals for risky actions |
 | `full_auto` | No confirmation prompts (previously "YOLO mode") |
 
-The YOLO checkbox resolves to `full_auto`. **Use only on trusted projects.**
+In the app, pick **Full auto** only on trusted projects. In the terminal: `agent-send --profile full_auto …`
 
-Full flag table per agent CLI: [docs/permission-profiles.md](docs/permission-profiles.md)
+Details: [docs/permission-profiles.md](docs/permission-profiles.md)
 
 ### Task queue
 
-Every remote `agent-send` call creates task records on both machines. Track status live in the **Tasks** panel — including a **[attach]** link to open a running agent session's terminal from any machine on the network.
+Every routed job creates records on both computers. Watch progress in **Activity** — use **Open** to jump to the agent’s terminal on this machine.
 
 Full details: [docs/task-queue.md](docs/task-queue.md)
+
+**Keeping Mac and Windows in sync:** [docs/feature-roadmap.md — GitHub section](docs/feature-roadmap.md#github--keeping-every-machine-on-the-same-version) (plain language, no git jargon).
 
 ## Daily use (CLI)
 
@@ -125,8 +130,9 @@ scripts/               desktop launchers, build scripts
 
 ## Testing two-way communication (Mac ↔ Windows)
 
-1. **Mac:** pull latest, `./scripts/install-desktop-launcher.sh`, open Desktop app.
-2. **Windows:** `git pull`, `.\install.ps1`, `.\scripts\install-desktop-launcher.ps1`, open Desktop app.
+1. **Both machines:** get the latest AgentRelay files from GitHub, run install, restart the app. Plain-language steps: [docs/feature-roadmap.md — GitHub section](docs/feature-roadmap.md#github--keeping-every-machine-on-the-same-version).
+2. **Mac:** `./scripts/install-desktop-launcher.sh`, open Desktop app.
+3. **Windows:** `.\install.ps1`, `.\scripts\install-desktop-launcher.ps1`, open Desktop app.
 3. On both: ensure the same `token` in `config.yaml` (or pair via **Connect**).
 4. Install skills on each machine.
 5. From Windows Codex: `agent-send claude@<mac-node> "hello from WINPC"`.

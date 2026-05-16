@@ -13,29 +13,80 @@ let sendTargets = [];
 let lastInboxTs = 0;
 
 const YOLO_STORAGE_KEY = "agentrelay_yolo_mode";
+const PROFILE_STORAGE_KEY = "agentrelay_launch_profile";
 
-function isYoloEnabled() {
-  return sessionStorage.getItem(YOLO_STORAGE_KEY) === "1";
+/** Plain-language labels for permission levels (see docs/permission-profiles.md). */
+const PROFILE_UI_LABELS = {
+  safe: "Careful — asks before risky steps",
+  project_write: "Project helper — edits files freely",
+  full_auto: "Full auto — no prompts (trusted projects only)",
+};
+
+const PROFILE_SHORT = {
+  safe: "Careful",
+  project_write: "Project",
+  full_auto: "Full auto",
+};
+
+let profileCatalog = [];
+
+function getLaunchProfile() {
+  let p = sessionStorage.getItem(PROFILE_STORAGE_KEY);
+  if (!p && sessionStorage.getItem(YOLO_STORAGE_KEY) === "1") {
+    p = "full_auto";
+    sessionStorage.setItem(PROFILE_STORAGE_KEY, p);
+  }
+  return p || "safe";
 }
 
-function setYoloEnabled(on) {
-  sessionStorage.setItem(YOLO_STORAGE_KEY, on ? "1" : "0");
-  const hint = el("yolo-hint");
-  if (hint) hint.hidden = !on;
-  for (const id of ["yolo-mode", "yolo-mode-terminals"]) {
-    const box = el(id);
-    if (box) box.checked = on;
+function setLaunchProfile(profileId) {
+  sessionStorage.setItem(PROFILE_STORAGE_KEY, profileId);
+  syncProfileSelects();
+  updateProfileHints();
+}
+
+function profileFriendly(id) {
+  return PROFILE_SHORT[id] || id || "—";
+}
+
+function syncProfileSelects() {
+  const current = getLaunchProfile();
+  for (const id of ["launch-profile", "launch-profile-terminals"]) {
+    const sel = el(id);
+    if (sel) sel.value = current;
   }
 }
 
-function syncYoloCheckboxes() {
-  const on = isYoloEnabled();
-  for (const id of ["yolo-mode", "yolo-mode-terminals"]) {
-    const box = el(id);
-    if (box) box.checked = on;
+function updateProfileHints() {
+  const p = getLaunchProfile();
+  const text = p === "full_auto"
+    ? "The agent can act without asking. Use only on projects you fully trust."
+    : p === "project_write"
+      ? "The agent can change project files more freely; shell commands may still ask."
+      : "The agent asks before risky actions (recommended default).";
+  for (const id of ["profile-hint-agents", "profile-hint-terminals"]) {
+    const hint = el(id);
+    if (hint) hint.textContent = text;
   }
-  const hint = el("yolo-hint");
-  if (hint) hint.hidden = !on;
+}
+
+async function loadPermissionProfiles() {
+  const { ok, data } = await api("/api/profiles");
+  if (!ok) return;
+  profileCatalog = data.profiles || [];
+  for (const selectId of ["launch-profile", "launch-profile-terminals"]) {
+    const sel = el(selectId);
+    if (!sel) continue;
+    sel.innerHTML = "";
+    for (const p of profileCatalog) {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = PROFILE_UI_LABELS[p.id] || p.label || p.id;
+      sel.appendChild(opt);
+    }
+  }
+  syncProfileSelects();
+  updateProfileHints();
 }
 
 function setFooter(msg) {
@@ -658,10 +709,12 @@ el("btn-clear-send").addEventListener("click", () => {
 function openAgentTerminal(agent, { injectSnippet = false, reuse = false } = {}) {
   if (!agent) return;
   showView("terminals");
+  const profile = getLaunchProfile();
   window.AgentRelayTerminals.openTerminal(agent, API_PORT, AUTH_TOKEN, {
     injectSnippet,
     reuse,
-    yolo: isYoloEnabled(),
+    profile,
+    yolo: profile === "full_auto",
   });
 }
 
@@ -805,10 +858,10 @@ el("btn-relay-stop").addEventListener("click", async () => {
   setRelay(false);
 });
 
-for (const id of ["yolo-mode", "yolo-mode-terminals"]) {
-  el(id)?.addEventListener("change", (e) => setYoloEnabled(e.target.checked));
+for (const id of ["launch-profile", "launch-profile-terminals"]) {
+  el(id)?.addEventListener("change", (e) => setLaunchProfile(e.target.value));
 }
-syncYoloCheckboxes();
+loadPermissionProfiles();
 
 async function pollDeliveries() {
   try {
@@ -1000,7 +1053,7 @@ function fmtDuration(secs) {
 function renderTasks(tasks) {
   const tbody = el("tasks-tbody");
   if (!tasks.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="tasks-empty">No tasks yet — send one from an agent using /relay-send or agent-send.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="tasks-empty">Nothing here yet — send work from an agent or from the Agents screen.</td></tr>';
     return;
   }
   const now = Date.now() / 1000;
@@ -1016,12 +1069,14 @@ function renderTasks(tasks) {
       ? escHtml(t.message.slice(0, 55)) + "…"
       : escHtml(t.message || "");
     const sessionCell = t.session_id
-      ? `<a href="#" class="task-attach" data-session="${escHtml(t.session_id)}" data-agent="${escHtml(t.target_agent)}">[attach]</a>`
+      ? `<a href="#" class="task-attach" data-session="${escHtml(t.session_id)}" data-agent="${escHtml(t.target_agent)}">Open</a>`
       : "—";
+    const freedom = profileFriendly(t.permission_profile);
     return `<tr>
       <td>${badge}</td>
       <td>${escHtml(t.target_node)}</td>
       <td>${escHtml(t.target_agent)}</td>
+      <td>${escHtml(freedom)}</td>
       <td class="task-msg" title="${escHtml(t.message)}">${msg}</td>
       <td>${relTime(t.created_at)}</td>
       <td>${duration}</td>

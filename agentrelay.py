@@ -1628,8 +1628,10 @@ class AgentRelay:
                                 )
                                 pty_registry.register(session)
                                 yolo = bool(frame.get("yolo", False))
+                                profile = frame.get("profile")
                                 await session.start(
-                                    interactive_launch_argv(agent, adapter, yolo=yolo))
+                                    interactive_launch_argv(
+                                        agent, adapter, yolo=yolo, profile=profile))
                             await session.subscribe(
                                 ws, owner=True, include_scrollback=reuse)
                             if frame.get("inject_snippet"):
@@ -2240,6 +2242,7 @@ class AgentRelay:
         app.router.add_post("/api/settings", self.handle_api_settings)
         app.router.add_post("/api/send", self.handle_api_send)
         app.router.add_post("/api/broadcast", self.handle_api_broadcast)
+        app.router.add_post("/api/coordinate", self.handle_coordinate)
         app.router.add_post("/api/relay/stop", self.handle_api_relay_stop)
         app.router.add_get("/api/terminal/sessions", self.handle_api_terminal_sessions)
         app.router.add_get("/api/profiles", self.handle_api_profiles)

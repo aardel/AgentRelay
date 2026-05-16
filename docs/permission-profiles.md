@@ -36,7 +36,7 @@ profile_summary()                               # dict for /api/profiles endpoin
 
 ## Backward Compatibility
 
-The `yolo=True` parameter on `relay_client.interactive_launch_argv()` still works and resolves to `full_auto`. The YOLO checkbox in the GUI passes through `profile_for_yolo()` unchanged.
+The `yolo=True` parameter on `relay_client.interactive_launch_argv()` still works and resolves to `full_auto`. The web UI **Freedom level** dropdown sets `profile` on terminal launch (`safe`, `project_write`, or `full_auto`).
 
 ## CLI Usage
 

@@ -117,7 +117,7 @@
    * @param {string} agent
    * @param {number} port
    * @param {string} token
-   * @param {{ sessionId?: string, injectSnippet?: boolean, reuse?: boolean, yolo?: boolean }} options
+   * @param {{ sessionId?: string, injectSnippet?: boolean, reuse?: boolean, yolo?: boolean, profile?: string }} options
    */
   function openTerminal(agent, port, token, options) {
     options = options || {};
@@ -125,6 +125,7 @@
     const injectSnippet = Boolean(options.injectSnippet);
     const reuse = options.reuse !== false;
     const yolo = Boolean(options.yolo);
+    const profile = options.profile || null;
 
     if (!global.Terminal || !global.FitAddon) {
       throw new Error("xterm.js not loaded");
@@ -191,6 +192,7 @@
             inject_snippet: injectSnippet,
             reuse,
             yolo,
+            profile,
           };
       ws.send(JSON.stringify(msg));
     };

@@ -17,6 +17,98 @@ The system should support both cautious workflows with approvals and high-trust 
 - Provide enough logs and session history to understand what happened later.
 - Make the default experience safe, but allow advanced users to opt into full automation.
 
+## GitHub — keeping every machine on the same version
+
+AgentRelay lives on **GitHub** so your Mac, Windows PC, and any other machine can share the same project files. Think of GitHub as a **shared project folder in the cloud** — not something you need to understand deeply to use AgentRelay day to day.
+
+### Plain language (no git jargon)
+
+| Instead of… | Say this |
+|-------------|----------|
+| pull | **Get the latest files** from GitHub onto this computer |
+| push | **Send your saved changes** up to GitHub so other machines can get them |
+| commit | **Save a snapshot** of what you changed (with a short note) |
+| branch | **Side copy** of the project — only matters if you are experimenting; most users stay on `main` |
+| merge / rebase / tree | **Ignore for now** — use the simple flow below |
+
+**Rule of thumb:** after you change AgentRelay on one machine, **send your changes to GitHub**, then on each other machine **get the latest files**, run the installer script once, and **restart** the app.
+
+### What you do on each computer (copy-paste friendly)
+
+**When this machine has the newest work and the other machines need it:**
+
+1. Save your work to GitHub (from the machine where you edited files).
+2. On every other machine: get the latest files, run install, restart AgentRelay.
+
+**Mac — get latest and run:**
+
+```bash
+cd ~/path/to/AgentRelay
+git pull
+./install.sh
+# restart: quit AgentRelay from the menu bar / Desktop launcher, then open it again
+```
+
+**Windows — get latest and run:**
+
+```powershell
+cd C:\path\to\AgentRelay
+git pull
+.\install.ps1
+.\scripts\install-desktop-launcher.ps1
+# restart: close AgentRelay, open from Desktop shortcut again
+```
+
+> **Note:** The commands above still use `git pull` because that is what the tool expects — you can read that as **“download the newest AgentRelay files.”** A future GUI button (**Check for updates**) should run this for you with no terminal vocabulary.
+
+### When things go wrong (simple fixes)
+
+| Problem | What it usually means | What to try |
+|---------|----------------------|-------------|
+| “Already up to date” | This machine already has the newest files | Restart the app anyway if behavior still feels old |
+| “Conflict” / “merge” | Two machines changed the same file differently | Ask whoever knows git to help once, or discard local doc edits and get latest again |
+| App acts old after “get latest” | Daemon/GUI still running old code in memory | Fully quit AgentRelay and open it again |
+| Windows and Mac out of sync | One side never got latest files | Run get-latest + install on **both**, then restart **both** |
+
+### Roadmap: make this user-friendly in the app
+
+- [ ] **Settings → Updates** panel: “Check for updates” / “This machine is up to date” (no `git` words in the UI).
+- [ ] One-click **Get latest on this machine** (runs get-latest + install hook, shows success/failure in plain English).
+- [ ] Optional reminder when a peer’s AgentRelay version looks older (compare version from `/api/status`).
+- [ ] Short in-app blurb: *“GitHub keeps all your computers on the same AgentRelay build. You only need to get latest after someone changes the project.”*
+
+**Out of scope for vibe-coder docs:** teaching branches, rebases, pull requests, or commit graphs. Link power users to standard git docs if needed.
+
+## Implementation status (May 2026)
+
+Legend: **Done** · **Partial** · **Not started**
+
+| Area | Status | Notes |
+|------|--------|--------|
+| Daemon (relay, pairing, mDNS, dispatch, forward) | **Done** | `agentrelay.py` |
+| Desktop web UI (pywebview + `gui/`) | **Done** | Default; Tkinter `--tk` fallback |
+| Local live terminals (xterm + PTY) | **Done** | Mac/Linux + Windows (pywinpty) |
+| Agent launch + instruction injection | **Done** | Agents + Live terminals views |
+| Message send / inbox / global broadcast | **Done** | Agents + Inbox |
+| Interactive delivery to open terminals | **Done** | Mac ↔ Windows verified |
+| Skills installer (`/relay-send`, etc.) | **Done** | Extra commands view |
+| Permission profiles (backend + CLI) | **Done** | `permission_profiles.py`, `agent-send --profile` |
+| Permission level in GUI | **Partial** | “Freedom level” dropdown on launch (replaces YOLO checkbox) |
+| Task queue + Activity view (SSE) | **Done** | `task_queue.py`, Activity tab |
+| SSH presets (backend + API) | **Done** | `ssh_hosts.py` |
+| SSH on Home screen | **Done** | List, add, test, discovered-computer prompts |
+| Agent notes (resume + memory) | **Done** | `agent_data.py`, Agent notes tab (branch `codex/agent-resumes-memory`) |
+| Group task (multi-agent coordinate) | **Done** | `POST /coordinate` + `/api/coordinate` |
+| Past chats (talk threads) | **Done** | `talk.py`, Past chats tab |
+| Remote terminal attach from other computers | **Not started** | `[attach]` opens local session only |
+| Remote SSH terminal tabs | **Not started** | Presets saved; no SSH shell UI yet |
+| Dedicated Machines / Permissions / Logs views | **Not started** | Folded into Home / Settings for now |
+| Activity / audit log (full history) | **Not started** | Inbox + Activity cover basics |
+| In-app “get latest files” (no git words) | **Not started** | Documented in GitHub section above |
+| Workflow builder, file sync, policy files | **Not started** | Phase 3+ |
+
+**Current branch note:** Agent notes + resume/memory APIs may be on `codex/agent-resumes-memory` until merged to `main`. See [TASKS.md](TASKS.md) for the live checklist.
+
 ## Redesigned GUI
 
 The current GUI should evolve into a full desktop control surface.
@@ -266,7 +358,10 @@ The first implementation pass should focus on high-value foundations.
 - ~~Task queue and task status tracking.~~ **Done (2026-05)** — SQLite `tasks.db`, full originator+receiver lifecycle, SSE-driven Tasks UI panel, `[attach]` links. See [docs/task-queue.md](task-queue.md).
 - ~~Permission profiles (Safe / Project Write / Full Auto).~~ **Done (2026-05)** — `permission_profiles.py`, `--profile` on `agent-send`. See [docs/permission-profiles.md](permission-profiles.md).
 - ~~SSH preset backend~~ **Done (2026-05)** — `ssh_hosts.py`, `/api/ssh-hosts`, `machine_id` in peer announce, pending-preset notifications.
-- **SSH host GUI** — preset list, add-host dialog, connectivity status in web UI.
+- ~~SSH host GUI (basic)~~ **Done (2026-05)** — Home screen: preset list, add computer, test & save, discovered-computer prompts. Dedicated “Machines” view still optional.
+- ~~Agent resumes + memory~~ **Done (2026-05)** — `agent_data.py`, Agent notes tab (merge to `main` pending).
+- ~~Multi-agent coordination GUI~~ **Done (2026-05)** — Group task tab; `/api/coordinate` alias.
+- **Permission level in GUI** — freedom dropdown on launch; send-from-GUI profile picker still optional.
 - Remote agent detection over SSH.
 - Launch remote agents into SSH terminals.
 - Trust levels for peers.

@@ -57,4 +57,4 @@ The Tasks UI panel shows an **[attach]** link for any task with a `session_id`. 
 
 ## Live UI
 
-The Tasks panel uses Server-Sent Events (`GET /api/tasks/events`) for real-time updates. The SSE endpoint pushes an event on every status transition; the panel fetches the updated task list immediately on each event. Polling runs only while active tasks exist and stops when all tasks reach a terminal state.
+The **Activity** tab (Tasks panel in code) uses Server-Sent Events (`GET /api/tasks/events`) for real-time updates. The SSE endpoint pushes an event on every status transition; the panel fetches the updated task list immediately on each event. Polling runs only while active tasks exist and stops when all tasks reach a terminal state.

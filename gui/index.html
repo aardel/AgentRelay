@@ -16,29 +16,29 @@
         <span id="status-badge" class="badge off">Stopped</span>
       </div>
       <nav class="nav">
-        <button type="button" class="nav-item active" data-view="dashboard">Dashboard</button>
+        <button type="button" class="nav-item active" data-view="dashboard">Home</button>
         <button type="button" class="nav-item" data-view="agents">Agents</button>
-        <button type="button" class="nav-item" data-view="resumes">Agent Resumes</button>
-        <button type="button" class="nav-item" data-view="coordination">Team Work</button>
-        <button type="button" class="nav-item" data-view="terminals">Terminals</button>
+        <button type="button" class="nav-item" data-view="resumes">Agent notes</button>
+        <button type="button" class="nav-item" data-view="coordination">Group task</button>
+        <button type="button" class="nav-item" data-view="terminals">Live terminals</button>
         <button type="button" class="nav-item" data-view="messages">Inbox</button>
-        <button type="button" class="nav-item" data-view="threads">Chat History</button>
-        <button type="button" class="nav-item" data-view="tasks">Task List</button>
-        <button type="button" class="nav-item" data-view="skills">Agent Tools</button>
-        <button type="button" class="nav-item" data-view="settings">Preferences</button>
+        <button type="button" class="nav-item" data-view="threads">Past chats</button>
+        <button type="button" class="nav-item" data-view="tasks">Activity</button>
+        <button type="button" class="nav-item" data-view="skills">Extra commands</button>
+        <button type="button" class="nav-item" data-view="settings">Settings</button>
       </nav>
       <div class="sidebar-footer">
-        <button type="button" id="btn-relay-stop" class="btn ghost small">Stop relay</button>
+        <button type="button" id="btn-relay-stop" class="btn ghost small">Stop background service</button>
       </div>
     </aside>
 
     <main class="content">
       <section id="view-dashboard" class="view active">
         <header class="view-header">
-          <h2>Dashboard</h2>
+          <h2>Home</h2>
           <button type="button" id="btn-refresh" class="btn ghost">Refresh</button>
         </header>
-        <p class="view-header-desc">See this computer and others on your network.</p>
+        <p class="view-header-desc">This computer, other computers on your network, and saved SSH connections.</p>
         <div class="grid two">
           <article class="card">
             <h3>This computer</h3>
@@ -100,18 +100,14 @@
             <button type="button" id="btn-launch-agent" class="btn primary">Launch</button>
             <button type="button" id="btn-open-terminal" class="btn ghost">Terminal only</button>
           </div>
-          <label class="yolo-toggle">
-            <input type="checkbox" id="yolo-mode">
-            YOLO mode — skip permission prompts
+          <label>How much freedom should the agent have?
+            <select id="launch-profile"></select>
           </label>
-          <p class="hint yolo-warning" id="yolo-hint" hidden>
-            Auto-approves tool use. Only enable on trusted projects.
-            See <code>docs/ai-cli-agents-yolo-flags.md</code>.
-          </p>
+          <p class="hint profile-hint" id="profile-hint-agents"></p>
         </article>
         <article class="card broadcast-card">
-          <h3>Global broadcast</h3>
-          <p class="broadcast-banner">This message goes to <strong>all agents at once</strong> with a global header so every agent knows it is shared.</p>
+          <h3>Message every agent</h3>
+          <p class="broadcast-banner">Sends the <strong>same instruction to every agent at once</strong>, with a clear header so they know it is shared.</p>
           <label>Message <textarea id="broadcast-message" rows="3" placeholder="Instruction for every agent…"></textarea></label>
           <label class="yolo-toggle">
             <input type="checkbox" id="broadcast-include-peers">
@@ -133,10 +129,10 @@
 
       <section id="view-resumes" class="view">
         <header class="view-header">
-          <h2>Agent Resumes</h2>
+          <h2>Agent notes</h2>
           <button type="button" id="btn-resumes-refresh" class="btn ghost">Refresh</button>
         </header>
-        <p class="view-header-desc">Manage agent profiles and persistent memories.</p>
+        <p class="view-header-desc">Short bios and remembered facts for each agent (saved on this computer).</p>
         <div class="grid two" style="grid-template-columns: 250px 1fr;">
           <article class="card" style="padding: 0; overflow: hidden; display: flex; flex-direction: column;">
             <ul id="resumes-agent-list" class="agent-list" style="flex: 1; overflow-y: auto; margin: 0; border-radius: 0; border: none;">
@@ -176,9 +172,9 @@
 
       <section id="view-coordination" class="view">
         <header class="view-header">
-          <h2>Team Work</h2>
+          <h2>Group task</h2>
         </header>
-        <p class="view-header-desc">Give one task to many agents at once and see their combined results.</p>
+        <p class="view-header-desc">Give one job to several agents and read their answers side by side.</p>
         <article class="card">
           <p class="hint" style="margin-bottom: 1rem;">Fan a task out to multiple agents, collect results, and optionally synthesize them.</p>
           
@@ -223,17 +219,17 @@
 
       <section id="view-terminals" class="view">
         <header class="view-header">
-          <h2>Terminals</h2>
+          <h2>Live terminals</h2>
           <div class="row">
             <select id="terminal-agent"></select>
             <button type="button" id="btn-new-terminal" class="btn primary">New tab</button>
             <button type="button" id="btn-relay-selection" class="btn ghost small">Relay selection...</button>
             <button type="button" id="btn-clear-terminal" class="btn ghost small">Clear</button>
           </div>
-          <label class="yolo-toggle compact">
-            <input type="checkbox" id="yolo-mode-terminals">
-            YOLO mode
+          <label class="profile-inline">Freedom level
+            <select id="launch-profile-terminals"></select>
           </label>
+          <p class="hint profile-hint" id="profile-hint-terminals"></p>
         </header>
         <p class="view-header-desc">Watch and interact with agents while they work.</p>
         <div class="terminal-shell">
@@ -255,7 +251,7 @@
 
       <section id="view-threads" class="view">
         <header class="view-header">
-          <h2>Chat History</h2>
+          <h2>Past chats</h2>
           <button type="button" id="btn-threads-refresh" class="btn ghost">Refresh</button>
         </header>
         <p class="view-header-desc">Review past conversations between your agents.</p>
@@ -274,7 +270,7 @@
 
       <section id="view-tasks" class="view">
         <header class="view-header">
-          <h2>Task List</h2>
+          <h2>Activity</h2>
           <button type="button" id="btn-tasks-refresh" class="btn ghost">Refresh</button>
         </header>
         <p class="view-header-desc">Track what agents are doing and check on their progress.</p>
@@ -286,14 +282,15 @@
                   <th>Status</th>
                   <th>Computer</th>
                   <th>Agent</th>
+                  <th>Freedom</th>
                   <th>Request</th>
                   <th>Started</th>
-                  <th>Time taken</th>
-                  <th>Session</th>
+                  <th>Time</th>
+                  <th>Open</th>
                 </tr>
               </thead>
               <tbody id="tasks-tbody">
-                <tr><td colspan="7" class="tasks-empty">Loading…</td></tr>
+                <tr><td colspan="8" class="tasks-empty">Loading…</td></tr>
               </tbody>
             </table>
           </div>
@@ -302,9 +299,9 @@
 
       <section id="view-skills" class="view">
         <header class="view-header">
-          <h2>Agent Tools</h2>
+          <h2>Extra commands</h2>
         </header>
-        <p class="view-header-desc">Give your agents new capabilities and helper commands.</p>
+        <p class="view-header-desc">Install helper commands (like <code>/relay-send</code>) into your AI apps.</p>
         <article class="card">
           <p class="hint">Install AgentRelay helper commands or Codex skills into your agent.</p>
           <div class="row">
@@ -322,9 +319,9 @@
 
       <section id="view-settings" class="view">
         <header class="view-header">
-          <h2>Preferences</h2>
+          <h2>Settings</h2>
         </header>
-        <p class="view-header-desc">Change how AgentRelay behaves on this machine.</p>
+        <p class="view-header-desc">Timing, copy-paste instructions for your agents, and how to stay up to date.</p>
         <article class="card">
           <label>Seconds to wait before sending (interactive agents)
             <input id="wait-seconds" type="number" min="1" max="120" value="5">
@@ -336,6 +333,10 @@
           <p class="hint">Copy into Codex, Cursor, or Claude so it knows how to forward work.</p>
           <pre id="agent-snippet" class="snippet"></pre>
           <button type="button" id="btn-copy" class="btn">Copy</button>
+        </article>
+        <article class="card">
+          <h3>Stay up to date</h3>
+          <p class="hint">When AgentRelay changes on another computer, get the newest files on this one, run install, then restart the app. Plain steps: <a href="https://github.com/aardel/AgentRelay/blob/main/docs/feature-roadmap.md#github--keeping-every-machine-on-the-same-version" target="_blank" rel="noopener">sync guide</a>.</p>
         </article>
       </section>
     </main>
