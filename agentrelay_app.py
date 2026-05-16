@@ -78,6 +78,110 @@ def resolve_prompt_target(targets: list[dict], name: str) -> dict | None:
     return next((target for target in targets if target["name"] == name), None)
 
 
+def agent_launch_script_name(adapter_name: str) -> str:
+    return f"agentrelay-launch-{adapter_name}.cmd"
+
+
+def find_agent_console_pids(adapter_name: str) -> list[int]:
+    """Return cmd.exe PIDs launched for an interactive adapter."""
+    if sys.platform != "win32":
+        return []
+    import json
+    import subprocess
+
+    script = agent_launch_script_name(adapter_name)
+    ps = (
+        "Get-CimInstance Win32_Process | "
+        f"Where-Object {{ $_.CommandLine -like '*{script}*' }} | "
+        "Sort-Object CreationDate -Descending | "
+        "Select-Object -ExpandProperty ProcessId | ConvertTo-Json"
+    )
+    try:
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", ps],
+            text=True,
+            timeout=3,
+        ).strip()
+    except Exception:
+        return []
+    if not out:
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, int):
+        return [data]
+    if isinstance(data, list):
+        return [int(pid) for pid in data if str(pid).isdigit()]
+    return []
+
+
+def write_console_input(pid: int, text: str, submit: bool) -> bool:
+    """Write keystrokes into a Windows console by process id."""
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    import ctypes.wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    STD_INPUT_HANDLE = -10
+    KEY_EVENT = 0x0001
+    KEYEVENTF_KEYUP = 0x0002
+    VK_RETURN = 0x0D
+    ATTACH_PARENT_PROCESS = -1
+
+    class KEY_EVENT_RECORD(ctypes.Structure):
+        _fields_ = [
+            ("bKeyDown", ctypes.wintypes.BOOL),
+            ("wRepeatCount", ctypes.wintypes.WORD),
+            ("wVirtualKeyCode", ctypes.wintypes.WORD),
+            ("wVirtualScanCode", ctypes.wintypes.WORD),
+            ("uChar", ctypes.wintypes.WCHAR),
+            ("dwControlKeyState", ctypes.wintypes.DWORD),
+        ]
+
+    class INPUT_RECORD(ctypes.Structure):
+        _fields_ = [
+            ("EventType", ctypes.wintypes.WORD),
+            ("KeyEvent", KEY_EVENT_RECORD),
+        ]
+
+    def _record(char: str, down: bool, vk: int = 0) -> INPUT_RECORD:
+        return INPUT_RECORD(
+            KEY_EVENT,
+            KEY_EVENT_RECORD(bool(down), 1, vk, 0, char, 0),
+        )
+
+    kernel32.FreeConsole()
+    if not kernel32.AttachConsole(int(pid)):
+        return False
+    try:
+        handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        if handle in (0, -1):
+            return False
+        records: list[INPUT_RECORD] = []
+        for char in text:
+            records.append(_record(char, True))
+            records.append(_record(char, False))
+        if submit:
+            records.append(_record("\r", True, VK_RETURN))
+            records.append(_record("\r", False, VK_RETURN))
+        written = ctypes.wintypes.DWORD()
+        arr_type = INPUT_RECORD * len(records)
+        arr = arr_type(*records)
+        ok = kernel32.WriteConsoleInputW(
+            handle,
+            arr,
+            len(records),
+            ctypes.byref(written),
+        )
+        return bool(ok and written.value == len(records))
+    finally:
+        kernel32.FreeConsole()
+        kernel32.AttachConsole(ATTACH_PARENT_PROCESS)
+
+
 class AgentRelayApp(tk.Tk):
     def __init__(self, config_path: Path) -> None:
         super().__init__()
@@ -107,7 +211,7 @@ class AgentRelayApp(tk.Tk):
         top = ttk.Frame(self, padding=14)
         top.pack(fill=tk.X)
         ttk.Label(top, text="AgentRelay", style="Title.TLabel").pack(anchor=tk.W)
-        ttk.Label(top, text="Connect your computers so agents can work together",
+        ttk.Label(top, text="Connect computers and route work between agents",
                   style="Sub.TLabel").pack(anchor=tk.W, pady=(2, 8))
 
         bar = ttk.Frame(top)
@@ -142,7 +246,7 @@ class AgentRelayApp(tk.Tk):
             side=tk.RIGHT, padx=(6, 0))
 
         # Nearby
-        nb = ttk.LabelFrame(self, text="Nearby computers", style="Card.TLabelframe", padding=10)
+        nb = ttk.LabelFrame(self, text="Other computers for pairing", style="Card.TLabelframe", padding=10)
         nb.pack(fill=tk.X, **pad)
         ttk.Button(nb, text="Refresh", command=self.refresh).pack(anchor=tk.E)
         self.nearby_frame = ttk.Frame(nb)
@@ -207,7 +311,7 @@ class AgentRelayApp(tk.Tk):
         ttk.Button(sk_all_row, text="Install All", command=self._install_all_skills).pack(
             side=tk.RIGHT)
 
-        # Prompt — send a message to any peer agent directly from the GUI
+        # Prompt — send a message to any local or connected agent directly from the GUI
         pm = ttk.LabelFrame(self, text="Send a message", style="Card.TLabelframe", padding=10)
         pm.pack(fill=tk.X, **pad)
         pm_top = ttk.Frame(pm)
@@ -410,8 +514,18 @@ class AgentRelayApp(tk.Tk):
         import time
 
         prompt = item["prompt"]
+        adapter_name = item.get("adapter_name", "")
         title_hint = item.get("title_hint", "").lower()
         wait_seconds = item.get("wait_seconds", 5)
+
+        if adapter_name:
+            for pid in find_agent_console_pids(adapter_name):
+                if write_console_input(pid, prompt, submit=False):
+                    time.sleep(max(1, wait_seconds))
+                    if write_console_input(pid, "", submit=True):
+                        self.after(0, lambda: self.footer.set(
+                            f"Delivered to '{adapter_name}' console"))
+                        return
 
         # Save and overwrite clipboard with the prompt
         try:

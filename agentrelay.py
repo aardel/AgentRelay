@@ -371,6 +371,7 @@ async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
         # so it can set focus even when Chrome Remote Desktop is active.
         _gui_delivery_queue.append({
             "id": uuid.uuid4().hex,
+            "adapter_name": adapter.name,
             "prompt": prompt,
             "title_hint": title_hint,
             "wait_seconds": wait_seconds,

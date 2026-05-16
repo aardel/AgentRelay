@@ -163,6 +163,10 @@ ROOT = _project_root()
 _daemon_proc: subprocess.Popen | None = None
 
 
+def agent_launch_script_name(adapter_name: str) -> str:
+    return f"agentrelay-launch-{adapter_name}.cmd"
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -488,7 +492,7 @@ def launch_agent(cfg: Config, agent_id: str) -> str:
     session = getattr(adapter, "session", None) or f"agentrelay-{agent_id}"
 
     if sys.platform == "win32":
-        bat = Path(tempfile.gettempdir()) / f"agentrelay-launch-{agent_id}.cmd"
+        bat = Path(tempfile.gettempdir()) / agent_launch_script_name(agent_id)
         bat.write_text(
             f"@echo off\r\n"
             f"chcp 65001 >nul\r\n"

@@ -7,7 +7,7 @@ Connect computers on your home network so your AI agents can work together.
 ## How it works
 
 1. Install AgentRelay on each computer.
-2. Open the app → **Start** → see **Nearby computers**.
+2. Open the app → **Start** → see **Other computers for pairing**.
 3. Tap **Connect** once per computer (approve on the other side if asked).
 4. Copy the **agent instructions** into Codex, Cursor, or Claude.
 5. Agents use `agent-forward` to send work to each other.
