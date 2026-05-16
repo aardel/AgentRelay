@@ -342,6 +342,14 @@ async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
         session = adapter.session or f"agentrelay-{adapter.name}"
         check = await run_subprocess(
             ["tmux", "has-session", "-t", session], timeout=5)
+        if check["exit_code"] != 0 and adapter.command:
+            await run_subprocess(
+                ["tmux", "new-session", "-d", "-s", session] + list(adapter.command),
+                timeout=10,
+            )
+            await asyncio.sleep(2)
+        check = await run_subprocess(
+            ["tmux", "has-session", "-t", session], timeout=5)
         if check["exit_code"] == 0:
             send = await run_subprocess(
                 ["tmux", "send-keys", "-t", session, prompt], timeout=10)
