@@ -44,6 +44,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import hashlib
+
 import aiohttp
 import yaml
 from aiohttp import web
@@ -60,6 +62,47 @@ from agent_data import AgentDataStore
 
 SERVICE_TYPE = "_agentrelay._tcp.local."
 INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
+DISCOVERY_BROADCAST = "255.255.255.255"
+
+
+def _token_hash(token: str) -> str:
+    """Short hash used in peer payloads to verify shared secret without exposing it."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+class _DiscoveryProtocol(asyncio.DatagramProtocol):
+    """UDP listener for LAN broadcast peer discovery."""
+
+    def __init__(self, relay: "AgentRelay") -> None:
+        self.relay = relay
+        self.transport: asyncio.DatagramTransport | None = None
+
+    def connection_made(self, transport: asyncio.DatagramTransport) -> None:  # type: ignore[override]
+        self.transport = transport
+
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        try:
+            msg = json.loads(data.decode())
+        except Exception:
+            return
+        node = msg.get("node", "")
+        if not node or node == self.relay.cfg.node_name:
+            return
+        token_hash = msg.get("token_hash", "")
+        if not token_hash or not secrets.compare_digest(
+            token_hash, _token_hash(self.relay.cfg.token)
+        ):
+            return
+        address = addr[0]  # use actual source IP, not the payload field
+        port = int(msg.get("port") or self.relay.cfg.port)
+        agents = msg.get("agents", "")
+        active_agents = msg.get("active_agents", "")
+        self.relay.peers.upsert(node, address, port,
+                                agents=agents, active_agents=active_agents)
+        asyncio.ensure_future(self.relay._announce_to_peer(address, port))
+
+    def error_received(self, exc: Exception) -> None:
+        log.debug("UDP discovery error: %s", exc)
 INTERACTIVE_SUFFIXES = ("-interactive", "-visible")
 
 
@@ -744,7 +787,8 @@ class PeerRegistry:
             del self.peers[name]
 
     def list(self, trusted: list[str] | None = None) -> list[dict[str, Any]]:
-        trusted = trusted or []
+        # trusted parameter kept for backward compat but ignored —
+        # token verification is the trust mechanism now.
         return [
             {
                 "name": p.name,
@@ -752,7 +796,7 @@ class PeerRegistry:
                 "port": p.port,
                 "agents": p.agents,
                 "active_agents": p.active_agents,
-                "connected": p.name in trusted,
+                "connected": True,
                 "last_seen": p.last_seen,
             }
             for p in self.peers.values()
@@ -775,6 +819,7 @@ class AgentRelay:
         self.browser: AsyncServiceBrowser | None = None
         self.service_info: ServiceInfo | None = None
         self._heartbeat_event: asyncio.Event | None = None
+        self._udp_transport: asyncio.DatagramTransport | None = None
         from relay_client import log_agent_availability
 
         log_agent_availability(cfg)
@@ -803,6 +848,7 @@ class AgentRelay:
             "agents": installed,
             "active_agents": active,
             "machine_id": get_machine_id(),
+            "token_hash": _token_hash(self.cfg.token),
         }
 
     async def register_mdns(self) -> None:
@@ -878,6 +924,33 @@ class AgentRelay:
         except Exception:
             pass
 
+    async def start_udp_discovery(self) -> None:
+        """Bind a UDP socket for LAN broadcast peer discovery."""
+        loop = asyncio.get_running_loop()
+        try:
+            transport, _ = await loop.create_datagram_endpoint(
+                lambda: _DiscoveryProtocol(self),
+                local_addr=("0.0.0.0", self.cfg.port),
+                allow_broadcast=True,
+            )
+            self._udp_transport = transport
+            log.info("UDP discovery listening on port %d (UDP)", self.cfg.port)
+        except Exception as exc:
+            log.warning("UDP discovery unavailable: %s", exc)
+
+    def _udp_broadcast(self) -> None:
+        """Send a UDP broadcast so any AgentRelay peer on the LAN can discover us."""
+        if self._udp_transport is None:
+            return
+        payload = self._peer_announcement_payload()
+        try:
+            self._udp_transport.sendto(
+                json.dumps(payload).encode(),
+                (DISCOVERY_BROADCAST, self.cfg.port),
+            )
+        except Exception as exc:
+            log.debug("UDP broadcast failed: %s", exc)
+
     def _trigger_heartbeat(self) -> None:
         """Signal the heartbeat loop to fire immediately (e.g. after a PTY change)."""
         if self._heartbeat_event is not None:
@@ -887,6 +960,7 @@ class AgentRelay:
         """Re-announce to all peers every 30s, or immediately when _trigger_heartbeat is called."""
         self._heartbeat_event = asyncio.Event()
         while not stop.is_set():
+            self._udp_broadcast()
             for peer in list(self.peers.peers.values()):
                 await self._announce_to_peer(peer.address, peer.port)
             self._heartbeat_event.clear()
@@ -899,6 +973,8 @@ class AgentRelay:
 
     async def shutdown(self) -> None:
         log.info("shutting down")
+        if self._udp_transport is not None:
+            self._udp_transport.close()
         if self.browser:
             await self.browser.async_cancel()
         if self.azc and self.service_info:
@@ -947,6 +1023,11 @@ class AgentRelay:
         agents = body.get("agents", "")
         active_agents = body.get("active_agents", "")
         machine_id = body.get("machine_id", "")
+        token_hash = body.get("token_hash", "")
+        if token_hash and not secrets.compare_digest(
+            token_hash, _token_hash(self.cfg.token)
+        ):
+            return web.json_response({"error": "unauthorized"}, status=401)
         if node and node != self.cfg.node_name:
             self.peers.upsert(
                 node, addr, port, agents=agents, active_agents=active_agents)
@@ -1015,7 +1096,7 @@ class AgentRelay:
         if not self._auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
         return web.json_response({
-            "peers": self.peers.list(self.cfg.trusted_peers),
+            "peers": self.peers.list(),
         })
 
     async def handle_setup(self, request: web.Request) -> web.Response:
@@ -1027,8 +1108,7 @@ class AgentRelay:
             "port": self.cfg.port,
             **self._agent_availability_payload(),
             "wait_before_send_seconds": self.cfg.wait_before_send_seconds,
-            "trusted_peers": self.cfg.trusted_peers,
-            "nearby": self.peers.list(self.cfg.trusted_peers),
+            "nearby": self.peers.list(),
         })
 
     async def handle_forward(self, request: web.Request) -> web.Response:
@@ -1850,7 +1930,7 @@ class AgentRelay:
             "address": self._local_ip(),
             "port": self.cfg.port,
             **self._agent_availability_payload(),
-            "nearby": self.peers.list(self.cfg.trusted_peers),
+            "nearby": self.peers.list(),
             "wait_before_send_seconds": self.cfg.wait_before_send_seconds,
         }
         return web.json_response(setup)
@@ -1953,7 +2033,7 @@ class AgentRelay:
         if scope != "all":
             return entries
         seen = {(e["node"], e["agent"]) for e in entries}
-        for peer in self.peers.list(self.cfg.trusted_peers):
+        for peer in self.peers.list():
             if not peer.get("connected"):
                 continue
             node = peer.get("name", "")
@@ -2424,8 +2504,6 @@ approve_timeout: 300
 relay:
   wait_before_send_seconds: 5
 
-trusted_peers: []
-
 # Default action when no rule matches and no hint is given.
 # One of: auto | agent | approve | reject
 default_action: approve
@@ -2496,6 +2574,7 @@ def write_default_config(path: Path) -> None:
 async def amain(cfg: Config, config_path: Path | None = None) -> None:
     relay = AgentRelay(cfg, config_path=config_path)
     await relay.register_mdns()
+    await relay.start_udp_discovery()
     app = relay.build_app()
     runner = web.AppRunner(app)
     await runner.setup()
@@ -2511,6 +2590,7 @@ async def amain(cfg: Config, config_path: Path | None = None) -> None:
         except NotImplementedError:
             pass  # Windows
 
+    relay._udp_broadcast()  # initial broadcast so peers find us immediately
     heartbeat = asyncio.create_task(relay._heartbeat_loop(stop))
     try:
         await stop.wait()

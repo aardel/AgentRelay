@@ -386,7 +386,6 @@ def fetch_setup(cfg: Config, config_path: Path) -> dict[str, Any]:
         "agents": setup.get("agents") or cfg.agent_labels(),
         "nearby": setup.get("nearby", []),
         "wait_before_send_seconds": cfg.wait_before_send_seconds,
-        "trusted_peers": cfg.trusted_peers,
     }
 
 
