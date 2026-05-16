@@ -774,6 +774,7 @@ class AgentRelay:
         self.azc: AsyncZeroconf | None = None
         self.browser: AsyncServiceBrowser | None = None
         self.service_info: ServiceInfo | None = None
+        self._heartbeat_event: asyncio.Event | None = None
         from relay_client import log_agent_availability
 
         log_agent_availability(cfg)
@@ -877,15 +878,24 @@ class AgentRelay:
         except Exception:
             pass
 
+    def _trigger_heartbeat(self) -> None:
+        """Signal the heartbeat loop to fire immediately (e.g. after a PTY change)."""
+        if self._heartbeat_event is not None:
+            self._heartbeat_event.set()
+
     async def _heartbeat_loop(self, stop: asyncio.Event) -> None:
-        """Every 30s re-announce ourselves to all known peers so they don't drop us."""
+        """Re-announce to all peers every 30s, or immediately when _trigger_heartbeat is called."""
+        self._heartbeat_event = asyncio.Event()
         while not stop.is_set():
             for peer in list(self.peers.peers.values()):
                 await self._announce_to_peer(peer.address, peer.port)
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=30)
-            except asyncio.TimeoutError:
-                pass
+            self._heartbeat_event.clear()
+            done, _ = await asyncio.wait(
+                [asyncio.ensure_future(stop.wait()),
+                 asyncio.ensure_future(self._heartbeat_event.wait())],
+                timeout=30,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
 
     async def shutdown(self) -> None:
         log.info("shutting down")
@@ -1689,6 +1699,7 @@ class AgentRelay:
                                 if existing:
                                     await existing.stop()
                                     pty_registry.remove(existing.session_id)
+                                    self._trigger_heartbeat()
                             if not session:
                                 from relay_client import (
                                     interactive_launch_argv,
@@ -1714,12 +1725,14 @@ class AgentRelay:
                                     rows=rows,
                                 )
                                 pty_registry.register(session)
+                                self._trigger_heartbeat()
                                 created_session = True
                                 try:
                                     await session.start(argv)
                                 except Exception as exc:
                                     created_session = False
                                     pty_registry.remove(session.session_id)
+                                    self._trigger_heartbeat()
                                     session = None
                                     log.warning(
                                         "PTY spawn failed for %s %r: %s",
@@ -1785,6 +1798,7 @@ class AgentRelay:
                             continue
                         await session.stop()
                         pty_registry.remove(session.session_id)
+                        self._trigger_heartbeat()
                         session = None
 
                 elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):

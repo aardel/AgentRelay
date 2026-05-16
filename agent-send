@@ -322,6 +322,26 @@ async def cmd_send(token: str, target: str, command: str,
         from relay_client import deliver_to_peer
         from task_queue import TaskQueue
 
+        # Verify the requested agent is actually running on the remote node.
+        token = cfg.get("token", "")
+        active_on_target = await _fetch_active_sessions(addr, port, token)
+        if active_on_target:
+            requested = agent or cfg.get("default_agent") or "claude"
+            if requested not in active_on_target:
+                print(
+                    f"warning: '{requested}' is not running on {target} "
+                    f"(active: {', '.join(active_on_target)}). "
+                    f"Message will still be delivered but may be unroutable.",
+                    file=sys.stderr,
+                )
+        elif agent:
+            # /info call failed (likely token mismatch) — warn that active state is unverified
+            print(
+                f"warning: could not verify active sessions on {target} "
+                f"(token mismatch or unreachable /info). Sending anyway.",
+                file=sys.stderr,
+            )
+
         node_name = self_name or cfg.get("node_name") or socket.gethostname().split(".")[0]
         tq = TaskQueue()
         task_id = await tq.create(

@@ -141,6 +141,8 @@ function renderAgents(agents, agentsMissing) {
   const ul = el("local-agents");
   const launch = el("launch-agent");
   const termAgent = el("terminal-agent");
+  const prevLaunch = launch.value;
+  const prevTermAgent = termAgent.value;
   ul.innerHTML = "";
   launch.innerHTML = "";
   termAgent.innerHTML = "";
@@ -189,6 +191,9 @@ function renderAgents(agents, agentsMissing) {
     li.style.opacity = "0.65";
     ul.appendChild(li);
   }
+
+  if ([...launch.options].some((o) => o.value === prevLaunch)) launch.value = prevLaunch;
+  if ([...termAgent.options].some((o) => o.value === prevTermAgent)) termAgent.value = prevTermAgent;
 }
 
 function renderNearby(list) {
