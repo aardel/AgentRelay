@@ -170,14 +170,14 @@ def agent_launch_script_name(adapter_name: str) -> str:
 
 def _run(coro):
     try:
-        asyncio.get_running_loop()
-        # Already inside a running event loop — run in a fresh thread to avoid
-        # the "asyncio.run() cannot be called from a running event loop" error.
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            return ex.submit(asyncio.run, coro).result()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        loop = None
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
 
 
 async def _health(port: int) -> bool:
@@ -219,7 +219,10 @@ def start_relay(config_path: Path) -> bool:
         return True
     flags = 0
     if sys.platform == "win32":
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        flags = (
+            subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
     if getattr(sys, "frozen", False):
         cmd = [sys.executable, "--relay-daemon", "--config", str(config_path)]
     else:
