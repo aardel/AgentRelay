@@ -119,6 +119,83 @@
    * @param {string} token
    * @param {{ sessionId?: string, injectSnippet?: boolean, reuse?: boolean, yolo?: boolean, profile?: string }} options
    */
+  // Shared right-click context menu for all terminal panels
+  let ctxMenu = null;
+  function ensureContextMenu() {
+    if (ctxMenu) return ctxMenu;
+    ctxMenu = document.createElement("div");
+    ctxMenu.id = "terminal-context-menu";
+    Object.assign(ctxMenu.style, {
+      position: "fixed",
+      zIndex: "9999",
+      background: "#2d2d2d",
+      border: "1px solid #555",
+      borderRadius: "4px",
+      padding: "4px 0",
+      boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
+      display: "none",
+      minWidth: "120px",
+      fontFamily: "system-ui, sans-serif",
+      fontSize: "13px",
+      color: "#ddd",
+    });
+
+    function makeItem(label, action) {
+      const el = document.createElement("div");
+      el.textContent = label;
+      Object.assign(el.style, {
+        padding: "6px 16px",
+        cursor: "pointer",
+        userSelect: "none",
+      });
+      el.addEventListener("mouseenter", () => el.style.background = "#444");
+      el.addEventListener("mouseleave", () => el.style.background = "");
+      el.addEventListener("mousedown", (e) => { e.preventDefault(); action(); hideContextMenu(); });
+      return el;
+    }
+
+    ctxMenu._copyItem = makeItem("Copy", () => {
+      const sel = getActiveSelection();
+      if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+    });
+    ctxMenu._pasteItem = makeItem("Paste", () => {
+      navigator.clipboard.readText().then((text) => {
+        if (text) sendToActiveTerminal(text);
+      }).catch(() => {});
+    });
+
+    ctxMenu.appendChild(ctxMenu._copyItem);
+    ctxMenu.appendChild(ctxMenu._pasteItem);
+    document.body.appendChild(ctxMenu);
+
+    document.addEventListener("mousedown", (e) => {
+      if (!ctxMenu.contains(e.target)) hideContextMenu();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") hideContextMenu();
+    });
+
+    return ctxMenu;
+  }
+
+  function showContextMenu(x, y) {
+    const menu = ensureContextMenu();
+    const hasSel = Boolean(getActiveSelection());
+    menu._copyItem.style.opacity = hasSel ? "1" : "0.4";
+    menu._copyItem.style.pointerEvents = hasSel ? "" : "none";
+    menu.style.display = "block";
+    menu.style.left = x + "px";
+    menu.style.top = y + "px";
+    // Keep within viewport
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = (x - rect.width) + "px";
+    if (rect.bottom > window.innerHeight) menu.style.top = (y - rect.height) + "px";
+  }
+
+  function hideContextMenu() {
+    if (ctxMenu) ctxMenu.style.display = "none";
+  }
+
   function openTerminal(agent, port, token, options) {
     options = options || {};
     const sessionId = options.sessionId || null;
@@ -160,6 +237,10 @@
     const panel = document.createElement("div");
     panel.className = "terminal-panel";
     panel.id = `panel-${id}`;
+    panel.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showContextMenu(e.clientX, e.clientY);
+    });
 
     const term = new Terminal({
       cursorBlink: true,
