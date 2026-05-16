@@ -7,10 +7,31 @@ Connect computers on your home network so your AI agents can work together.
 ## How it works
 
 1. Install AgentRelay on each computer.
-2. Open the app → **Start** → see **Other computers for pairing**.
-3. Tap **Connect** once per computer (approve on the other side if asked).
-4. Copy the **agent instructions** into Codex, Cursor, or Claude.
-5. Agents use `agent-forward` to send work to each other.
+2. Open the app and pair with other computers on your LAN.
+3. Install **Skills** (slash commands) into Claude, Codex, or Gemini.
+4. Use **Launch** to open an agent in an embedded terminal with instructions.
+5. Agents use `agent-send` / `agent-forward` to route work between machines.
+
+## Quick start — Desktop launcher
+
+### macOS
+
+```bash
+cd /path/to/AgentRelay
+./scripts/install-desktop-launcher.sh
+```
+
+Double-click **AgentRelay** on your Desktop. Only one GUI window opens at a time; a second click opens the existing UI in your browser.
+
+### Windows
+
+```powershell
+cd C:\path\to\AgentRelay
+.\install.ps1
+.\scripts\install-desktop-launcher.ps1
+```
+
+Double-click **AgentRelay** on your Desktop.
 
 ## Install (Windows)
 
@@ -19,82 +40,76 @@ cd /d e:\path\to\AgentRelay
 install.ps1
 ```
 
-Then open the **desktop app** (not a browser):
-
-```cmd
-cd /d e:\path\to\AgentRelay
-agentrelay-gui.cmd
-```
+Or use the desktop launcher above. The app is an **embedded web UI** (pywebview). Fallback: `agentrelay-gui --browser`. Legacy Tkinter: `agentrelay-gui --tk`.
 
 **Important:** Use `cd /d` when switching drives (e.g. from `C:` to `E:`).
-
-In the app, use **Launch** next to an agent — it opens a terminal, shows the AgentRelay instructions, copies them to your clipboard, and pastes them into the terminal automatically.
 
 ## Install (Mac / Linux)
 
 ```bash
 cd agentrelay
 ./install.sh
+./scripts/install-desktop-launcher.sh   # optional Desktop icon
 agentrelay-gui
 ```
 
-### Mac native app (pick one)
+**Linux:** `pip install pywebview[gtk]` (or `pywebview[qt]`).
 
-**Easy — double-click launcher** (after `install.sh`):
+## Using the app
 
-```bash
-chmod +x AgentRelay.command
-```
+| Feature | What it does |
+|---------|----------------|
+| **Launch** | PTY terminal + start agent CLI + paste AgentRelay instructions |
+| **Terminal only** | Blank terminal tab (no auto-start) |
+| **YOLO mode** | Checkbox — adds skip-permissions flags (see below) |
+| **Skills** | Install `/relay-send`, `/relay-codex`, etc. into your agent |
+| **Terminals** | Multiple tabs; click **×** to close a tab |
+| **Messages** | Incoming work from remote peers |
 
-Then double-click **AgentRelay.command** in Finder.
+### YOLO / full-auto mode
 
-**Full Mac app** (`.app` in Applications):
+Optional checkbox on **Agents** and **Terminals**. When enabled, Launch adds each CLI's skip-permissions flags (e.g. Claude `--dangerously-skip-permissions`, Codex `--dangerously-bypass-approvals-and-sandbox`). **Use only on trusted projects.**
 
-```bash
-chmod +x scripts/build_mac_app.sh
-./scripts/build_mac_app.sh
-open dist/AgentRelay.app
-```
+Full reference: [docs/ai-cli-agents-yolo-flags.md](docs/ai-cli-agents-yolo-flags.md)
 
-### Windows native app bundle
-
-```powershell
-.\scripts\build_win_app.ps1
-.\dist\AgentRelay\AgentRelay.exe
-```
-
-## Daily use
+## Daily use (CLI)
 
 | What | Command |
 |------|---------|
-| Open setup app | `agentrelay-gui` |
+| Open app | Desktop icon or `agentrelay-gui` |
+| Run daemon only | `agentrelay --config config.yaml` |
 | Forward a request | `agent-forward mac "install the build tools"` |
 | Send to a specific agent | `agent-send codex@mac "fix the failing build"` |
-| Send to an agent on this PC | `agent-send claude@local "review this repo"` |
-| Ask several local agents | `agent-send --local --agents claude,codex "compare approaches"` |
-| List nearby | shown in the app (refreshes automatically) |
+| Send locally | `agent-send claude@local "review this repo"` |
+| Multi-agent local | `agent-send --local --agents claude,codex "compare approaches"` |
 
-## Visible agent window (Mac)
+## Architecture
 
-For requests to appear in Codex's input line on the Mac:
+- **Daemon** (`agentrelay.py`) — HTTP/WebSocket on port 9876, mDNS peers, PTY sessions
+- **GUI shell** (`agentrelay_gui.py` → `agentrelay_web.py`) — pywebview loading local `gui/`
+- **Single instance** — daemon PID lock (`/tmp/agentrelay.pid`); GUI lock (`/tmp/agentrelay-gui.pid`)
 
-1. Open Codex in a terminal on the Mac (keep that window open).
-2. The app uses a named session called `agentrelay-codex` by default — start Codex in a terminal session with that name, or adjust `codex-visible` in settings.
-
-The forwarded text appears in the input line. You can edit it. After **5 seconds** (configurable in the app), it sends automatically.
-
-## Files
+## Project layout
 
 ```
-agentrelay.py       background service (finds other computers)
-agentrelay_gui.py   setup app (connect, settings, agent instructions)
-agent-forward       forward a request to another computer
-agent-talk          threaded agent messages (advanced)
-agent-send          one-shot jobs (advanced)
-talk.py / pairing.py / config_io.py
-gui/                app screens
+agentrelay.py          background service
+agentrelay_gui.py      desktop entry (web UI default)
+agentrelay_web.py      pywebview shell
+relay_client.py        start/stop relay, skills, launch helpers
+gui/                   web UI (HTML/JS + xterm.js terminals)
+docs/                  roadmap, YOLO flags reference
+scripts/               desktop launchers, build scripts
 ```
+
+## Testing two-way communication (Mac ↔ Windows)
+
+1. **Mac:** pull latest, `./scripts/install-desktop-launcher.sh`, open Desktop app.
+2. **Windows:** `git pull`, `.\install.ps1`, `.\scripts\install-desktop-launcher.ps1`, open Desktop app.
+3. On both: ensure the same `token` in `config.yaml` (or pair via **Connect**).
+4. Install skills on each machine.
+5. From Windows Codex: `agent-send claude@<mac-node> "hello from WINPC"`.
+6. Check **Messages** on Mac and Mac agent inbox.
 
 ## Security
 
-Only connect computers you trust (same home network). Anyone with your connection code can send requests as you.
+Only connect computers you trust (same home network). Anyone with your connection token can send requests as you. **YOLO mode** disables permission prompts — never use it on untrusted repos or with production credentials in scope.

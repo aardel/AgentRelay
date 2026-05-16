@@ -112,9 +112,24 @@ Copy-Item -LiteralPath (Join-Path $sourceDir "pairing.py") -Destination (Join-Pa
 Copy-Item -LiteralPath (Join-Path $sourceDir "config_io.py") -Destination (Join-Path $installRoot "config_io.py") -Force
 Copy-Item -LiteralPath (Join-Path $sourceDir "agent-forward") -Destination (Join-Path $installRoot "agent-forward") -Force
 Copy-Item -LiteralPath (Join-Path $sourceDir "agentrelay_gui.py") -Destination (Join-Path $installRoot "agentrelay_gui.py") -Force
+Copy-Item -LiteralPath (Join-Path $sourceDir "agentrelay_web.py") -Destination (Join-Path $installRoot "agentrelay_web.py") -Force
 Copy-Item -LiteralPath (Join-Path $sourceDir "agentrelay_app.py") -Destination (Join-Path $installRoot "agentrelay_app.py") -Force
 Copy-Item -LiteralPath (Join-Path $sourceDir "relay_client.py") -Destination (Join-Path $installRoot "relay_client.py") -Force
+Copy-Item -LiteralPath (Join-Path $sourceDir "gui_paths.py") -Destination (Join-Path $installRoot "gui_paths.py") -Force
+Copy-Item -LiteralPath (Join-Path $sourceDir "instance_lock.py") -Destination (Join-Path $installRoot "instance_lock.py") -Force
+Copy-Item -LiteralPath (Join-Path $sourceDir "yolo_flags.py") -Destination (Join-Path $installRoot "yolo_flags.py") -Force
+Copy-Item -LiteralPath (Join-Path $sourceDir "pty_session.py") -Destination (Join-Path $installRoot "pty_session.py") -Force
+Copy-Item -LiteralPath (Join-Path $sourceDir "pty_unix.py") -Destination (Join-Path $installRoot "pty_unix.py") -Force
+if (Test-Path -LiteralPath (Join-Path $sourceDir "pty_windows.py")) {
+    Copy-Item -LiteralPath (Join-Path $sourceDir "pty_windows.py") -Destination (Join-Path $installRoot "pty_windows.py") -Force
+}
+if (Test-Path -LiteralPath (Join-Path $sourceDir "terminal_pane.py")) {
+    Copy-Item -LiteralPath (Join-Path $sourceDir "terminal_pane.py") -Destination (Join-Path $installRoot "terminal_pane.py") -Force
+}
 Copy-Item -LiteralPath (Join-Path $sourceDir "gui") -Destination (Join-Path $installRoot "gui") -Recurse -Force
+if (Test-Path -LiteralPath (Join-Path $sourceDir "docs")) {
+    Copy-Item -LiteralPath (Join-Path $sourceDir "docs") -Destination (Join-Path $installRoot "docs") -Recurse -Force
+}
 
 $agentrelayCmd = Join-Path $binPath "agentrelay.cmd"
 $agentSendCmd = Join-Path $binPath "agent-send.cmd"
@@ -170,3 +185,6 @@ Write-Host "  config     -> $configPath"
 Write-Host ""
 Write-Host "Add this directory to PATH if you want global commands:"
 Write-Host "  $binPath"
+Write-Host ""
+Write-Host "Optional — Desktop shortcut:"
+Write-Host "  .\scripts\install-desktop-launcher.ps1"

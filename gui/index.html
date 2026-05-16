@@ -4,72 +4,156 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AgentRelay</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="/gui/style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
 </head>
 <body>
-  <header>
-    <h1>AgentRelay</h1>
-    <p class="subtitle">Connect computers and route work between agents</p>
-    <div class="header-bar">
-      <span id="status-badge" class="badge off">Stopped</span>
-      <button type="button" id="btn-relay" class="btn primary">Start</button>
-    </div>
-  </header>
-
-  <main>
-    <section class="card">
-      <h2>This computer</h2>
-      <label>Name <input id="node-name" type="text"></label>
-      <p class="hint" id="this-address"></p>
-      <h3>Agents on this computer</h3>
-      <ul id="local-agents" class="agent-list"></ul>
-    </section>
-
-    <section class="card">
-      <div class="row">
-        <h2>Other computers for pairing</h2>
-        <button type="button" id="btn-refresh" class="btn ghost">Refresh</button>
+  <div class="app" id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>AgentRelay</h1>
+        <span id="status-badge" class="badge off">Stopped</span>
       </div>
-      <ul id="nearby-list" class="nearby-list">
-        <li class="empty">Start AgentRelay to look for other computers</li>
-      </ul>
-    </section>
+      <nav class="nav">
+        <button type="button" class="nav-item active" data-view="dashboard">Dashboard</button>
+        <button type="button" class="nav-item" data-view="agents">Agents</button>
+        <button type="button" class="nav-item" data-view="terminals">Terminals</button>
+        <button type="button" class="nav-item" data-view="messages">Messages</button>
+        <button type="button" class="nav-item" data-view="skills">Skills</button>
+        <button type="button" class="nav-item" data-view="settings">Settings</button>
+      </nav>
+      <div class="sidebar-footer">
+        <button type="button" id="btn-relay-stop" class="btn ghost small">Stop relay</button>
+      </div>
+    </aside>
 
-    <section class="card" id="pending-card" hidden>
-      <h2>Connection requests</h2>
-      <ul id="pending-list"></ul>
-    </section>
+    <main class="content">
+      <section id="view-dashboard" class="view active">
+        <header class="view-header">
+          <h2>Dashboard</h2>
+          <button type="button" id="btn-refresh" class="btn ghost">Refresh</button>
+        </header>
+        <div class="grid two">
+          <article class="card">
+            <h3>This computer</h3>
+            <p class="hint" id="this-address"></p>
+            <label>Name <input id="node-name" type="text"></label>
+          </article>
+          <article class="card">
+            <h3>Other computers</h3>
+            <ul id="nearby-list" class="nearby-list">
+              <li class="empty">Looking for peers…</li>
+            </ul>
+          </article>
+        </div>
+        <article class="card" id="pending-card" hidden>
+          <h3>Connection requests</h3>
+          <ul id="pending-list"></ul>
+        </article>
+      </section>
 
-    <section class="card">
-      <h2>Send a message</h2>
-      <label>Target
-        <select id="send-target"></select>
-      </label>
-      <label>Agent
-        <select id="send-agent"></select>
-      </label>
-      <label>Message
-        <textarea id="send-message" rows="4"></textarea>
-      </label>
-      <button type="button" id="btn-send" class="btn primary">Send</button>
-      <p class="hint" id="send-status"></p>
-    </section>
+      <section id="view-agents" class="view">
+        <header class="view-header">
+          <h2>Agents</h2>
+        </header>
+        <article class="card">
+          <ul id="local-agents" class="agent-list"></ul>
+          <div class="row launch-row">
+            <select id="launch-agent"></select>
+            <button type="button" id="btn-launch-agent" class="btn primary">Launch</button>
+            <button type="button" id="btn-open-terminal" class="btn ghost">Terminal only</button>
+          </div>
+          <label class="yolo-toggle">
+            <input type="checkbox" id="yolo-mode">
+            YOLO mode — skip permission prompts
+          </label>
+          <p class="hint yolo-warning" id="yolo-hint" hidden>
+            Auto-approves tool use. Only enable on trusted projects.
+            See <code>docs/ai-cli-agents-yolo-flags.md</code>.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Send a message</h3>
+          <label>Target <select id="send-target"></select></label>
+          <label>Agent <select id="send-agent"></select></label>
+          <label>Message <textarea id="send-message" rows="4"></textarea></label>
+          <button type="button" id="btn-send" class="btn primary">Send</button>
+          <p class="hint" id="send-status"></p>
+        </article>
+      </section>
 
-    <section class="card">
-      <h2>Settings</h2>
-      <label>Seconds to wait before sending (so you can edit the text)
-        <input id="wait-seconds" type="number" min="1" max="60" value="5">
-      </label>
-      <button type="button" id="btn-save" class="btn">Save settings</button>
-    </section>
+      <section id="view-terminals" class="view">
+        <header class="view-header">
+          <h2>Terminals</h2>
+          <div class="row">
+            <select id="terminal-agent"></select>
+            <button type="button" id="btn-new-terminal" class="btn primary">New tab</button>
+          </div>
+          <label class="yolo-toggle compact">
+            <input type="checkbox" id="yolo-mode-terminals">
+            YOLO mode
+          </label>
+        </header>
+        <div class="terminal-shell">
+          <div class="terminal-tabs" id="terminal-tabs"></div>
+          <div id="terminal-panels" class="terminal-panels"></div>
+        </div>
+        <p class="hint">Click × on a tab to close it. The agent keeps running in the background — open the same agent again to reattach.</p>
+      </section>
 
-    <section class="card">
-      <h2>Instructions for your agent</h2>
-      <p class="hint">Copy this into Codex, Cursor, or Claude so it knows how to forward work.</p>
-      <pre id="agent-snippet" class="snippet"></pre>
-      <button type="button" id="btn-copy" class="btn">Copy</button>
-    </section>
-  </main>
-  <script src="app.js"></script>
+      <section id="view-messages" class="view">
+        <header class="view-header">
+          <h2>Messages received</h2>
+        </header>
+        <article class="card">
+          <pre id="inbox-log" class="inbox-log"></pre>
+        </article>
+      </section>
+
+      <section id="view-skills" class="view">
+        <header class="view-header">
+          <h2>Skills</h2>
+        </header>
+        <article class="card">
+          <p class="hint">Install slash commands into your agent so it knows how to use AgentRelay.</p>
+          <div class="row">
+            <label>Install for
+              <select id="skill-target"></select>
+            </label>
+          </div>
+          <ul id="skills-list" class="skills-list"></ul>
+          <div class="row" style="margin-top: 0.75rem;">
+            <button type="button" id="btn-skills-install-all" class="btn primary">Install all</button>
+            <button type="button" id="btn-skills-remove-all" class="btn ghost">Remove all</button>
+          </div>
+        </article>
+      </section>
+
+      <section id="view-settings" class="view">
+        <header class="view-header">
+          <h2>Settings</h2>
+        </header>
+        <article class="card">
+          <label>Seconds to wait before sending (interactive agents)
+            <input id="wait-seconds" type="number" min="1" max="120" value="5">
+          </label>
+          <button type="button" id="btn-save" class="btn primary">Save</button>
+        </article>
+        <article class="card">
+          <h3>Instructions for your agent</h3>
+          <p class="hint">Copy into Codex, Cursor, or Claude so it knows how to forward work.</p>
+          <pre id="agent-snippet" class="snippet"></pre>
+          <button type="button" id="btn-copy" class="btn">Copy</button>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <footer id="footer" class="footer"></footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <script src="/gui/terminals.js"></script>
+  <script src="/gui/app.js"></script>
 </body>
 </html>

@@ -269,9 +269,20 @@ The first implementation pass should focus on high-value foundations.
 - Signed peer requests.
 - Team/shared machine support.
 
+## Architecture Decision (2026-05)
+
+**Chosen path:** one installable app per OS with an **embedded local web UI** served by the existing `agentrelay` daemon (`aiohttp` on `localhost`).
+
+- **Shell:** `pywebview` (WebView2 / WebKit / GTK) — not a cloud-hosted website.
+- **UI:** HTML/CSS/JS in `gui/`, including integrated **xterm.js** tabs wired to `/terminal`.
+- **Daemon:** unchanged role — mDNS, pairing, dispatch, PTY sessions; also serves static UI and `/api/*`.
+- **Legacy:** Tkinter UI remains available via `agentrelay-gui --tk` until the web shell is fully equivalent.
+
+Each machine runs the full stack. Remote peers use the relay protocol; remote terminal viewing uses read-only WebSocket attach (see `TERMINAL_PROTOCOL.md`).
+
 ## Open Design Questions
 
-- Should the redesigned GUI remain Tkinter, or move to a richer stack such as Qt, Tauri, Electron, or a local web UI?
+- ~~Should the redesigned GUI remain Tkinter, or move to a richer stack such as Qt, Tauri, Electron, or a local web UI?~~ **Resolved:** local web UI in pywebview (see above).
 - Should integrated terminals be implemented directly, or should AgentRelay standardize on tmux sessions first?
 - How should full-auto permissions map to each supported agent CLI?
 - What is the safest default storage for SSH credentials on macOS, Windows, and Linux?

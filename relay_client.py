@@ -114,11 +114,10 @@ def is_skill_installed(name: str, target: str) -> bool:
     return bool(commands_dir and (commands_dir / f"{name}.md").exists())
 
 
-def list_skills(relay_root: Path) -> list[dict[str, Any]]:
-    commands_dir = claude_commands_dir()
+def list_skills(relay_root: Path, target: str = "Claude Code") -> list[dict[str, Any]]:
     definitions = _skill_definitions(relay_root)
     return [{"name": n, "label": lbl,
-             "installed": (commands_dir / f"{n}.md").exists()}
+             "installed": is_skill_installed(n, target)}
             for n, (lbl, _) in definitions.items()]
 
 
@@ -419,27 +418,36 @@ def approve_request(cfg: Config, config_path: Path,
     save_raw(data, config_path)
 
 
-def _interactive_launch_command(adapter_id: str, adapter) -> str:
-    """Start the agent interactively without the {prompt} relay placeholder."""
+def interactive_launch_argv(adapter_id: str, adapter, yolo: bool = False) -> list[str]:
+    """Argv for an interactive PTY session (no {prompt} placeholder)."""
+    from yolo_flags import apply_yolo_flags
+
     parts = [p for p in (adapter.command or []) if p != "{prompt}"]
     if adapter.mode in ("interactive", "interactive_tmux"):
-        base = parts[0] if parts else adapter_id
-        return base
-    if not parts:
-        return adapter_id
-    # Drop -p / exec flags that expect a prompt argument
-    cleaned: list[str] = []
-    skip_next = False
-    for p in parts:
-        if skip_next:
-            skip_next = False
-            continue
-        if p in ("-p", "--prompt", "exec"):
+        argv = parts if parts else [adapter_id]
+    elif not parts:
+        argv = [adapter_id]
+    else:
+        cleaned: list[str] = []
+        skip_next = False
+        for p in parts:
+            if skip_next:
+                skip_next = False
+                continue
             if p in ("-p", "--prompt"):
                 skip_next = True
-            continue
-        cleaned.append(p)
-    return " ".join(cleaned) if cleaned else (parts[0] if parts else adapter_id)
+                continue
+            if p == "exec":
+                continue
+            cleaned.append(p)
+        argv = cleaned if cleaned else [adapter_id]
+    return apply_yolo_flags(argv, adapter_id, yolo)
+
+
+def _interactive_launch_command(adapter_id: str, adapter) -> str:
+    """Shell-style command string for external terminal launchers."""
+    argv = interactive_launch_argv(adapter_id, adapter)
+    return " ".join(argv)
 
 
 def send_to_peer(cfg: Config, addr: str, port: int,

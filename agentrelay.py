@@ -50,6 +50,7 @@ from aiohttp import web
 from zeroconf import IPVersion, ServiceInfo, ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
+from gui_paths import gui_directory
 from pairing import PairingManager
 from talk import ConversationStore
 from pty_session import PTYSession, pty_registry
@@ -588,8 +589,9 @@ class PeerRegistry:
 # ============================================================
 
 class AgentRelay:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, config_path: Path | None = None):
         self.cfg = cfg
+        self.config_path = config_path or DEFAULT_CONFIG
         self.peers = PeerRegistry()
         self.talk = ConversationStore()
         self.pairing = PairingManager()
@@ -692,9 +694,22 @@ class AgentRelay:
 
     # ---- HTTP handlers ----
 
+    def _token_from_request(self, request: web.Request) -> str:
+        header = request.headers.get("X-Agent-Token", "")
+        if header:
+            return header
+        return request.rel_url.query.get("token", "")
+
     def _auth(self, request: web.Request) -> bool:
         return secrets.compare_digest(
-            request.headers.get("X-Agent-Token", ""), self.cfg.token)
+            self._token_from_request(request), self.cfg.token)
+
+    def reload_config(self) -> None:
+        if self.config_path.exists():
+            self.cfg = Config.load(self.config_path)
+
+    def _localhost(self, request: web.Request) -> bool:
+        return request.remote in ("127.0.0.1", "::1", "localhost")
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "node": self.cfg.node_name})
@@ -1268,7 +1283,6 @@ class AgentRelay:
                             # Remote viewer — no write_token
                             await session.subscribe(ws, owner=False)
                         else:
-                            # Create new session — this client is the owner
                             adapter = self.cfg.adapters.get(agent)
                             if not adapter:
                                 await ws.send_str(json.dumps(
@@ -1276,15 +1290,26 @@ class AgentRelay:
                                      "code": "agent_not_found",
                                      "message": f"no adapter for agent '{agent}'"}))
                                 continue
-                            session = PTYSession(
-                                agent_name=agent,
-                                node=self.cfg.node_name,
-                                cols=cols,
-                                rows=rows,
-                            )
-                            pty_registry.register(session)
-                            await session.start(list(adapter.command))
+                            session = None
+                            if frame.get("reuse", True):
+                                session = pty_registry.find_alive_by_agent(agent)
+                            if not session:
+                                from relay_client import interactive_launch_argv
+
+                                session = PTYSession(
+                                    agent_name=agent,
+                                    node=self.cfg.node_name,
+                                    cols=cols,
+                                    rows=rows,
+                                )
+                                pty_registry.register(session)
+                                yolo = bool(frame.get("yolo", False))
+                                await session.start(
+                                    interactive_launch_argv(agent, adapter, yolo=yolo))
                             await session.subscribe(ws, owner=True)
+                            if frame.get("inject_snippet"):
+                                asyncio.create_task(
+                                    self._inject_agent_snippet(session))
 
                     elif ftype == "input":
                         if not session:
@@ -1341,6 +1366,256 @@ class AgentRelay:
 
         return ws
 
+    async def _inject_agent_snippet(self, session: PTYSession) -> None:
+        """Paste AgentRelay instructions into a new PTY after the shell starts."""
+        from relay_client import build_agent_snippet, _fetch_nearby_agents
+
+        try:
+            nearby = await _fetch_nearby_agents(self.cfg)
+        except Exception:
+            nearby = []
+        snippet = build_agent_snippet(self.cfg, nearby)
+        await asyncio.sleep(1.2)
+        if not session.alive:
+            return
+        try:
+            await session.write(snippet, session.grant_write())
+        except Exception as exc:
+            log.warning("snippet inject failed for %s: %s", session.agent_name, exc)
+
+    # ---- GUI HTTP API (local web UI) ----
+
+    async def handle_gui_index(self, request: web.Request) -> web.Response:
+        index = gui_directory() / "index.html"
+        if not index.is_file():
+            return web.Response(status=404, text="GUI not installed")
+        return web.FileResponse(index)
+
+    async def handle_api_status(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        setup = {
+            "relay_running": True,
+            "node": self.cfg.node_name,
+            "address": self._local_ip(),
+            "port": self.cfg.port,
+            "agents": self.cfg.agent_labels(),
+            "nearby": self.peers.list(self.cfg.trusted_peers),
+            "wait_before_send_seconds": self.cfg.wait_before_send_seconds,
+        }
+        return web.json_response(setup)
+
+    async def handle_api_pending(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"pending": self.pairing.list_pending()})
+
+    async def handle_api_agent_snippet(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        from relay_client import build_agent_snippet, _fetch_nearby_agents
+
+        try:
+            nearby = await _fetch_nearby_agents(self.cfg)
+        except Exception:
+            nearby = []
+        snippet = build_agent_snippet(self.cfg, nearby)
+        return web.json_response({"snippet": snippet})
+
+    async def handle_api_approve(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        rid = body.get("request_id", "")
+        peer_name = body.get("peer_name", "")
+        if not self.pairing.approve(rid, self.cfg.token, self.cfg.node_name):
+            return web.json_response({"error": "not found"}, status=404)
+        if peer_name and self.config_path.exists():
+            from config_io import load_raw, save_raw
+
+            data = load_raw(self.config_path)
+            trusted = list(set(data.get("trusted_peers") or []) | {peer_name})
+            data["trusted_peers"] = trusted
+            save_raw(data, self.config_path)
+            self.reload_config()
+        return web.json_response({"ok": True})
+
+    async def handle_api_connect(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        peer = (body.get("peer") or "").strip()
+        if not peer:
+            return web.json_response({"error": "peer required"}, status=400)
+        from relay_client import connect_peer
+
+        loop = asyncio.get_running_loop()
+        ok, msg = await loop.run_in_executor(
+            None, connect_peer, self.cfg, self.config_path, peer)
+        if ok:
+            self.reload_config()
+        status = 200 if ok else 400
+        return web.json_response({"ok": ok, "error": None if ok else msg}, status=status)
+
+    async def handle_api_settings(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        from config_io import update_settings
+
+        update_settings(
+            self.config_path,
+            node_name=body.get("node_name"),
+            wait_before_send_seconds=body.get("wait_before_send_seconds"),
+        )
+        self.reload_config()
+        return web.json_response({"ok": True})
+
+    async def handle_api_send(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        agent = (body.get("agent") or "").strip()
+        message = (body.get("message") or "").strip()
+        local = bool(body.get("local"))
+        addr = (body.get("address") or "127.0.0.1").strip()
+        port = int(body.get("port") or self.cfg.port)
+        if not agent or not message:
+            return web.json_response({"error": "agent and message required"}, status=400)
+        if local:
+            if agent not in self.cfg.adapters:
+                return web.json_response({"error": f"unknown agent: {agent}"}, status=400)
+            adapter = self.cfg.adapters[agent]
+            if adapter.mode in INTERACTIVE_MODES:
+                result = await spawn_agent(self.cfg, adapter, message)
+            else:
+                talk_cfg = dataclasses.replace(self.cfg, use_tmux=False)
+                result = await spawn_agent(talk_cfg, adapter, message)
+            ok = result.get("exit_code", 1) == 0
+            return web.json_response({"ok": ok, **result})
+        from relay_client import send_to_peer
+
+        loop = asyncio.get_running_loop()
+        ok, msg = await loop.run_in_executor(
+            None, send_to_peer, self.cfg, addr, port, message, agent)
+        return web.json_response({"ok": ok, "message": msg})
+
+    async def handle_api_inbox(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        since = float(request.rel_url.query.get("since", 0))
+        from_node = request.rel_url.query.get("from", "")
+        items = [
+            m for m in _dispatch_inbox
+            if m["ts"] > since and (not from_node or m["from"] == from_node)
+        ]
+        return web.json_response({"messages": items})
+
+    async def handle_api_relay_stop(self, request: web.Request) -> web.Response:
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+
+        async def _shutdown() -> None:
+            await asyncio.sleep(0.3)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        asyncio.create_task(_shutdown())
+        return web.json_response({"ok": True})
+
+    async def handle_api_terminal_sessions(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"sessions": pty_registry.list()})
+
+    async def handle_api_skills(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        from relay_client import ROOT, SKILL_TARGETS, list_skills
+
+        target = request.rel_url.query.get("target", "Claude Code")
+        if target not in SKILL_TARGETS:
+            return web.json_response({"error": f"unknown target: {target}"}, status=400)
+        return web.json_response({
+            "target": target,
+            "targets": list(SKILL_TARGETS.keys()),
+            "skills": list_skills(ROOT, target),
+        })
+
+    async def handle_api_skills_install(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        from relay_client import ROOT, SKILL_TARGETS, install_skill
+
+        name = (body.get("name") or "").strip()
+        target = body.get("target", "Claude Code")
+        if target not in SKILL_TARGETS:
+            return web.json_response({"error": f"unknown target: {target}"}, status=400)
+        msg = install_skill(name, ROOT, target)
+        ok = not msg.startswith("Unknown")
+        return web.json_response({"ok": ok, "message": msg})
+
+    async def handle_api_skills_remove(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        from relay_client import SKILL_TARGETS, remove_skill
+
+        name = (body.get("name") or "").strip()
+        target = body.get("target", "Claude Code")
+        if target not in SKILL_TARGETS:
+            return web.json_response({"error": f"unknown target: {target}"}, status=400)
+        msg = remove_skill(name, target)
+        return web.json_response({"ok": True, "message": msg})
+
+    async def handle_api_skills_install_all(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        from relay_client import ROOT, SKILL_TARGETS, install_all_skills
+
+        target = body.get("target", "Claude Code")
+        if target not in SKILL_TARGETS:
+            return web.json_response({"error": f"unknown target: {target}"}, status=400)
+        results = install_all_skills(ROOT, target)
+        return web.json_response({"ok": True, "messages": results})
+
+    async def handle_api_skills_remove_all(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        from relay_client import ROOT, SKILL_TARGETS, remove_all_skills
+
+        target = body.get("target", "Claude Code")
+        if target not in SKILL_TARGETS:
+            return web.json_response({"error": f"unknown target: {target}"}, status=400)
+        results = remove_all_skills(ROOT, target)
+        return web.json_response({"ok": True, "messages": results})
+
     def build_app(self) -> web.Application:
         app = web.Application(client_max_size=1024 * 1024)
         app.router.add_get("/health", self.handle_health)
@@ -1362,6 +1637,25 @@ class AgentRelay:
         app.router.add_post("/pair/reject", self.handle_pair_reject)
         app.router.add_get("/pair/poll", self.handle_pair_poll)
         app.router.add_get("/terminal", self.handle_terminal)
+        app.router.add_get("/", self.handle_gui_index)
+        gui_dir = gui_directory()
+        if gui_dir.is_dir():
+            app.router.add_static("/gui/", gui_dir, name="gui_static")
+        app.router.add_get("/api/status", self.handle_api_status)
+        app.router.add_get("/api/pending", self.handle_api_pending)
+        app.router.add_get("/api/agent-snippet", self.handle_api_agent_snippet)
+        app.router.add_get("/api/inbox", self.handle_api_inbox)
+        app.router.add_post("/api/approve", self.handle_api_approve)
+        app.router.add_post("/api/connect", self.handle_api_connect)
+        app.router.add_post("/api/settings", self.handle_api_settings)
+        app.router.add_post("/api/send", self.handle_api_send)
+        app.router.add_post("/api/relay/stop", self.handle_api_relay_stop)
+        app.router.add_get("/api/terminal/sessions", self.handle_api_terminal_sessions)
+        app.router.add_get("/api/skills", self.handle_api_skills)
+        app.router.add_post("/api/skills/install", self.handle_api_skills_install)
+        app.router.add_post("/api/skills/remove", self.handle_api_skills_remove)
+        app.router.add_post("/api/skills/install-all", self.handle_api_skills_install_all)
+        app.router.add_post("/api/skills/remove-all", self.handle_api_skills_remove_all)
         return app
 
 
@@ -1458,8 +1752,8 @@ def write_default_config(path: Path) -> None:
     print("or copy the security code from Advanced settings.")
 
 
-async def amain(cfg: Config) -> None:
-    relay = AgentRelay(cfg)
+async def amain(cfg: Config, config_path: Path | None = None) -> None:
+    relay = AgentRelay(cfg, config_path=config_path)
     await relay.register_mdns()
     app = relay.build_app()
     runner = web.AppRunner(app)
@@ -1518,7 +1812,7 @@ def main() -> None:
     atexit.register(pid_file.unlink, missing_ok=True)
 
     try:
-        asyncio.run(amain(cfg))
+        asyncio.run(amain(cfg, config_path=args.config))
     except KeyboardInterrupt:
         pass
 

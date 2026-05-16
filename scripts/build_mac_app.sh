@@ -12,13 +12,15 @@ pip install -q -r requirements.txt pyinstaller
 
 pyinstaller --noconfirm --windowed --name AgentRelay \
   --osx-bundle-identifier com.agentrelay.app \
+  --add-data "$ROOT/gui:gui" \
   --hidden-import aiohttp \
   --hidden-import zeroconf \
   --hidden-import yaml \
   --hidden-import pyperclip \
+  --hidden-import webview \
   --collect-submodules aiohttp \
   --collect-submodules zeroconf \
-  "$ROOT/agentrelay_app.py"
+  "$ROOT/agentrelay_gui.py"
 
 echo ""
 echo "Built: $ROOT/dist/AgentRelay.app"

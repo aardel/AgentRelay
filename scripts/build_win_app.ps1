@@ -10,13 +10,15 @@ if (-not (Test-Path $py)) {
 & $py -m pip install -q -r requirements.txt pyinstaller
 
 & $py -m PyInstaller --noconfirm --windowed --name AgentRelay `
+  --add-data "$(Join-Path $Root 'gui');gui" `
   --hidden-import aiohttp `
   --hidden-import zeroconf `
   --hidden-import yaml `
   --hidden-import pyperclip `
+  --hidden-import webview `
   --collect-submodules aiohttp `
   --collect-submodules zeroconf `
-  (Join-Path $Root "agentrelay_app.py")
+  (Join-Path $Root "agentrelay_gui.py")
 
 Write-Host ""
 Write-Host "Built: $Root\dist\AgentRelay\AgentRelay.exe"

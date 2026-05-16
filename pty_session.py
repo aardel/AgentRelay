@@ -225,6 +225,12 @@ class PTYRegistry:
     def remove(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
 
+    def find_alive_by_agent(self, agent_name: str) -> PTYSession | None:
+        for session in self._sessions.values():
+            if session.agent_name == agent_name and session.alive:
+                return session
+        return None
+
     def list(self) -> list[dict]:
         return [
             {

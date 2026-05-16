@@ -805,7 +805,7 @@ def _run_daemon(config_path: Path) -> None:
     import asyncio
     from agentrelay import Config, amain
     cfg = Config.load(config_path)
-    asyncio.run(amain(cfg))
+    asyncio.run(amain(cfg, config_path=config_path))
 
 
 def main() -> None:

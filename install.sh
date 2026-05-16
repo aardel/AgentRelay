@@ -41,9 +41,17 @@ $SUDO install -m 0644 "$SRC_DIR/pairing.py"      "$VENV/pairing.py"
 $SUDO install -m 0644 "$SRC_DIR/config_io.py"   "$VENV/config_io.py"
 $SUDO install -m 0755 "$SRC_DIR/agent-forward"  "$VENV/agent-forward"
 $SUDO install -m 0755 "$SRC_DIR/agentrelay_gui.py" "$VENV/agentrelay_gui.py"
+$SUDO install -m 0755 "$SRC_DIR/agentrelay_web.py" "$VENV/agentrelay_web.py"
 $SUDO install -m 0755 "$SRC_DIR/agentrelay_app.py"  "$VENV/agentrelay_app.py"
 $SUDO install -m 0644 "$SRC_DIR/relay_client.py"   "$VENV/relay_client.py"
+$SUDO install -m 0644 "$SRC_DIR/gui_paths.py"    "$VENV/gui_paths.py"
+$SUDO install -m 0644 "$SRC_DIR/instance_lock.py" "$VENV/instance_lock.py"
+$SUDO install -m 0644 "$SRC_DIR/yolo_flags.py"   "$VENV/yolo_flags.py"
+$SUDO install -m 0644 "$SRC_DIR/pty_session.py"  "$VENV/pty_session.py"
+$SUDO install -m 0644 "$SRC_DIR/pty_unix.py"     "$VENV/pty_unix.py"
+$SUDO install -m 0644 "$SRC_DIR/pty_windows.py"  "$VENV/pty_windows.py" 2>/dev/null || true
 $SUDO cp -R "$SRC_DIR/gui" "$VENV/gui"
+$SUDO cp -R "$SRC_DIR/docs" "$VENV/docs" 2>/dev/null || true
 
 # Wrapper scripts that invoke the venv's python
 $SUDO tee "$BIN/agentrelay" >/dev/null <<EOF
