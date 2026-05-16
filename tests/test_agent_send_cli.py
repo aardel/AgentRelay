@@ -156,6 +156,26 @@ class AgentSendCliTests(unittest.TestCase):
 
         agent_send.asyncio.run(run_test())
 
+    def test_cmd_send_uses_deliver_to_peer_for_remote_target(self):
+        async def run_test():
+            cfg = {"node_name": "MAC", "port": 9876, "token": "x" * 32}
+            with patch.object(agent_send, "discover", AsyncMock(return_value={})):
+                with patch.object(
+                    agent_send, "discover_from_daemon",
+                    AsyncMock(return_value={
+                        "WINPC": {"address": "192.168.1.186", "port": 9876, "agents": ""},
+                    }),
+                ):
+                    with patch("relay_client.deliver_to_peer", return_value=(True, "Forwarded")) as deliver:
+                        with patch("builtins.print"):
+                            rc = await agent_send.cmd_send(
+                                "token", "WINPC", "hello", "codex-interactive", None, cfg)
+
+            self.assertEqual(rc, 0)
+            deliver.assert_called_once()
+
+        agent_send.asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()

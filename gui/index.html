@@ -72,12 +72,23 @@
             See <code>docs/ai-cli-agents-yolo-flags.md</code>.
           </p>
         </article>
+        <article class="card broadcast-card">
+          <h3>Global broadcast</h3>
+          <p class="broadcast-banner">This message goes to <strong>all agents at once</strong> with a global header so every agent knows it is shared.</p>
+          <label>Message <textarea id="broadcast-message" rows="3" placeholder="Instruction for every agent…"></textarea></label>
+          <label class="yolo-toggle">
+            <input type="checkbox" id="broadcast-include-peers">
+            Also send to agents on connected computers
+          </label>
+          <button type="button" id="btn-broadcast" class="btn primary">Broadcast to all agents</button>
+          <p class="hint" id="broadcast-status"></p>
+        </article>
         <article class="card">
-          <h3>Send a message</h3>
+          <h3>Send to one agent</h3>
           <label>Target <select id="send-target"></select></label>
           <label>Agent <select id="send-agent"></select></label>
           <label>Message <textarea id="send-message" rows="4"></textarea></label>
-          <button type="button" id="btn-send" class="btn primary">Send</button>
+          <button type="button" id="btn-send" class="btn ghost">Send</button>
           <p class="hint" id="send-status"></p>
         </article>
       </section>
@@ -98,7 +109,7 @@
           <div class="terminal-tabs" id="terminal-tabs"></div>
           <div id="terminal-panels" class="terminal-panels"></div>
         </div>
-        <p class="hint">Click × on a tab to close it. The agent keeps running in the background — open the same agent again to reattach.</p>
+        <p class="hint">Click × to close a tab. <strong>New tab</strong> starts a fresh session. <strong>Launch</strong> (Agents view) reattaches to a running agent if one exists.</p>
       </section>
 
       <section id="view-messages" class="view">

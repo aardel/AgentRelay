@@ -25,7 +25,7 @@ from relay_client import (
     relay_running,
     remove_all_skills,
     remove_skill,
-    send_to_peer,
+    deliver_to_peer,
     skill_names,
     start_relay,
     stop_relay,
@@ -502,7 +502,7 @@ class AgentRelayApp(tk.Tk):
         self.prompt_text.configure(state=tk.DISABLED)
 
         def _work():
-            ok, msg = send_to_peer(self.cfg, addr, port, text, agent)
+            ok, msg = deliver_to_peer(self.cfg, addr, port, text, agent)
             def _done():
                 self.prompt_text.configure(state=tk.NORMAL)
                 if ok:

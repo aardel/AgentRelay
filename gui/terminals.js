@@ -145,6 +145,7 @@
         case "open_ack":
           tab.sessionId = frame.session_id;
           tab.writeToken = frame.write_token;
+          term.clear();
           if (frame.scrollback) term.write(b64ToBytes(frame.scrollback));
           fitAddon.fit();
           break;

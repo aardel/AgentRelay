@@ -17,6 +17,8 @@ import aiohttp
 from agentrelay import DEFAULT_CONFIG, Config
 from config_io import load_raw, save_raw, update_settings
 
+INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
+
 # ── Skills management ────────────────────────────────────────────────────────
 
 SKILL_TARGETS: dict[str, Path] = {
@@ -452,7 +454,7 @@ def _interactive_launch_command(adapter_id: str, adapter) -> str:
 
 def send_to_peer(cfg: Config, addr: str, port: int,
                  command: str, agent: str | None = None) -> tuple[bool, str]:
-    """Dispatch a command to a remote peer's /dispatch endpoint."""
+    """Dispatch a headless command to a remote peer's /dispatch endpoint."""
     import uuid as _uuid
     payload: dict = {
         "from": cfg.node_name,
@@ -476,10 +478,94 @@ def send_to_peer(cfg: Config, addr: str, port: int,
     try:
         status, data = _run(_post())
         if status == 200:
-            return True, "Sent"
-        return False, data.get("error", f"HTTP {status}")
+            detail = (data.get("stdout") or data.get("status") or "Sent").strip()
+            return True, detail or "Sent"
+        return False, data.get("error", data.get("stderr", f"HTTP {status}"))
     except Exception as e:
         return False, str(e)
+
+
+async def _fetch_peer_adapter_mode(
+    cfg: Config, addr: str, port: int, agent: str,
+) -> str | None:
+    """Return adapter mode from peer /info, or None if unavailable."""
+    try:
+        t = aiohttp.ClientTimeout(total=3)
+        async with aiohttp.ClientSession(timeout=t) as session:
+            async with session.get(
+                f"http://{addr}:{port}/info",
+                headers={"X-Agent-Token": cfg.token},
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                info = await resp.json()
+        spec = (info.get("adapters") or {}).get(agent) or {}
+        return spec.get("mode")
+    except Exception:
+        return None
+
+
+def _looks_interactive(agent: str, mode: str | None) -> bool:
+    if mode in INTERACTIVE_MODES:
+        return True
+    return agent.endswith("-interactive") or agent.endswith("-visible")
+
+
+def forward_to_peer(
+    cfg: Config,
+    addr: str,
+    port: int,
+    message: str,
+    to_agent: str,
+    from_agent: str | None = None,
+) -> tuple[bool, str]:
+    """Deliver to a visible agent window on a remote peer via /forward."""
+    payload = {
+        "from_node": cfg.node_name,
+        "from_agent": from_agent or cfg.default_agent or "agentrelay",
+        "to_agent": to_agent,
+        "message": message,
+    }
+
+    async def _post():
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"http://{addr}:{port}/forward",
+                json=payload,
+                headers={"X-Agent-Token": cfg.token},
+            ) as resp:
+                data = await resp.json()
+                return resp.status, data
+
+    try:
+        status, data = _run(_post())
+        if status == 200 and data.get("ok"):
+            detail = (data.get("stdout") or data.get("status") or "Forwarded").strip()
+            return True, detail or "Forwarded to agent window"
+        err = data.get("error") or data.get("stderr") or f"HTTP {status}"
+        return False, str(err)
+    except Exception as e:
+        return False, str(e)
+
+
+def deliver_to_peer(
+    cfg: Config,
+    addr: str,
+    port: int,
+    message: str,
+    agent: str | None = None,
+) -> tuple[bool, str]:
+    """
+    Send to a remote peer using /forward for interactive agents, else /dispatch.
+    Interactive delivery shows in the agent's terminal window on the remote machine.
+    """
+    if not agent:
+        return send_to_peer(cfg, addr, port, message, agent)
+    mode = _run(_fetch_peer_adapter_mode(cfg, addr, port, agent))
+    if _looks_interactive(agent, mode):
+        return forward_to_peer(cfg, addr, port, message, agent)
+    return send_to_peer(cfg, addr, port, message, agent)
 
 
 def launch_agent(cfg: Config, agent_id: str) -> str:

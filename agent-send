@@ -279,6 +279,16 @@ async def cmd_send(token: str, target: str, command: str,
             print("no peers discovered on the LAN", file=sys.stderr)
         return 1
     addr, port = resolve_target_address(target, cfg, peers)
+
+    if not is_local_target(target, cfg):
+        from agentrelay import Config
+        from relay_client import deliver_to_peer
+
+        ok, msg = deliver_to_peer(
+            Config.load_dict(cfg), addr, port, command, agent)
+        print(json.dumps({"ok": ok, "message": msg, "delivery": "auto"}, indent=2))
+        return 0 if ok else 1
+
     url = f"http://{addr}:{port}/dispatch"
     payload: dict = {
         "from": self_name or socket.gethostname().split(".")[0],

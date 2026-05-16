@@ -75,6 +75,13 @@ _gui_delivery_queue: list[dict] = []
 _dispatch_inbox: list[dict] = []
 _INBOX_MAX = 200
 
+GLOBAL_BROADCAST_PREFIX = (
+    "═══ AgentRelay GLOBAL BROADCAST ═══\n"
+    "This message is sent to ALL agents simultaneously.\n"
+    "Treat it as a shared instruction for every agent.\n"
+    "══════════════════════════════════\n\n"
+)
+
 
 def pid_file_path() -> Path:
     return Path(tempfile.gettempdir()) / "agentrelay.pid"
@@ -818,13 +825,26 @@ class AgentRelay:
             result = await spawn_agent(
                 self.cfg, adapter, header + message)
 
+        import time as _time
+        _dispatch_inbox.append({
+            "request_id": uuid.uuid4().hex,
+            "from": from_node,
+            "agent": to_agent,
+            "command": message,
+            "ts": _time.time(),
+        })
+        if len(_dispatch_inbox) > _INBOX_MAX:
+            _dispatch_inbox.pop(0)
+
         notify("AgentRelay",
                f"Request from {from_node}: {message[:50]}")
-        ok = result.get("exit_code", 1) == 0
+        ok = result.get("exit_code", 1) == 0 or result.get("status") in (
+            "sent", "queued", "spawned")
         return web.json_response({
             "ok": ok,
             "node": self.cfg.node_name,
             "agent": to_agent,
+            "delivery": "forward",
             **result,
         })
 
@@ -1290,9 +1310,15 @@ class AgentRelay:
                                      "code": "agent_not_found",
                                      "message": f"no adapter for agent '{agent}'"}))
                                 continue
+                            reuse = bool(frame.get("reuse", True))
                             session = None
-                            if frame.get("reuse", True):
+                            if reuse:
                                 session = pty_registry.find_alive_by_agent(agent)
+                            else:
+                                existing = pty_registry.find_alive_by_agent(agent)
+                                if existing:
+                                    await existing.stop()
+                                    pty_registry.remove(existing.session_id)
                             if not session:
                                 from relay_client import interactive_launch_argv
 
@@ -1306,7 +1332,8 @@ class AgentRelay:
                                 yolo = bool(frame.get("yolo", False))
                                 await session.start(
                                     interactive_launch_argv(agent, adapter, yolo=yolo))
-                            await session.subscribe(ws, owner=True)
+                            await session.subscribe(
+                                ws, owner=True, include_scrollback=reuse)
                             if frame.get("inject_snippet"):
                                 asyncio.create_task(
                                     self._inject_agent_snippet(session))
@@ -1480,6 +1507,107 @@ class AgentRelay:
         self.reload_config()
         return web.json_response({"ok": True})
 
+    def _peer_agent_ids(self, agents_field: Any) -> list[str]:
+        if isinstance(agents_field, list):
+            return [str(a).strip() for a in agents_field if str(a).strip()]
+        return [a.strip() for a in str(agents_field or "").split(",") if a.strip()]
+
+    def _broadcast_agent_entries(self, scope: str) -> list[dict[str, str]]:
+        """Build [{node, agent}, ...] for local-only or all connected peers."""
+        entries = [
+            {"node": self.cfg.node_name, "agent": agent_id}
+            for agent_id in self.cfg.adapters
+        ]
+        if scope != "all":
+            return entries
+        seen = {(e["node"], e["agent"]) for e in entries}
+        for peer in self.peers.list(self.cfg.trusted_peers):
+            if not peer.get("connected"):
+                continue
+            node = peer.get("name", "")
+            if not node or node == self.cfg.node_name:
+                continue
+            for agent_id in self._peer_agent_ids(peer.get("agents")):
+                key = (node, agent_id)
+                if key not in seen:
+                    seen.add(key)
+                    entries.append({"node": node, "agent": agent_id})
+        return entries
+
+    async def _deliver_broadcast(self, node: str, agent: str, message: str) -> dict:
+        """Send a global broadcast message to one agent on local or remote node."""
+        if node == self.cfg.node_name:
+            if agent not in self.cfg.adapters:
+                return {"node": node, "agent": agent, "ok": False,
+                        "error": f"unknown local agent: {agent}"}
+            adapter = self.cfg.adapters[agent]
+            if adapter.mode in INTERACTIVE_MODES:
+                result = await spawn_agent(self.cfg, adapter, message)
+            else:
+                talk_cfg = dataclasses.replace(self.cfg, use_tmux=False)
+                result = await spawn_agent(talk_cfg, adapter, message)
+            ok = result.get("exit_code", 1) == 0
+            return {"node": node, "agent": agent, "ok": ok,
+                    "status": result.get("status"), "stdout": result.get("stdout", "")}
+
+        peer = self.peers.peers.get(node)
+        if not peer:
+            return {"node": node, "agent": agent, "ok": False,
+                    "error": f"peer not found: {node}"}
+        url = f"http://{peer.address}:{peer.port}/forward"
+        payload = {
+            "from_node": self.cfg.node_name,
+            "from_agent": "agentrelay-broadcast",
+            "to_agent": agent,
+            "message": message,
+        }
+        try:
+            t = aiohttp.ClientTimeout(total=None, sock_connect=5)
+            async with aiohttp.ClientSession(timeout=t) as s:
+                async with s.post(
+                    url, json=payload, headers={"X-Agent-Token": self.cfg.token},
+                ) as r:
+                    data = await r.json()
+            ok = r.status == 200 and data.get("ok", False)
+            return {"node": node, "agent": agent, "ok": ok, "status": data.get("status")}
+        except Exception as exc:
+            return {"node": node, "agent": agent, "ok": False, "error": str(exc)}
+
+    async def handle_api_broadcast(self, request: web.Request) -> web.Response:
+        """Send the same global message to all agents (local, or all connected peers)."""
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        message = (body.get("message") or "").strip()
+        scope = (body.get("scope") or "local").strip().lower()
+        if not message:
+            return web.json_response({"error": "message required"}, status=400)
+        if scope not in ("local", "all"):
+            return web.json_response(
+                {"error": "scope must be 'local' or 'all'"}, status=400)
+
+        entries = self._broadcast_agent_entries(scope)
+        if not entries:
+            return web.json_response({"error": "no agents configured"}, status=400)
+
+        task = GLOBAL_BROADCAST_PREFIX + message
+        results = await asyncio.gather(
+            *[self._deliver_broadcast(e["node"], e["agent"], task) for e in entries])
+        succeeded = sum(1 for r in results if r.get("ok"))
+        return web.json_response({
+            "ok": succeeded > 0,
+            "global_broadcast": True,
+            "scope": scope,
+            "sent_to": len(entries),
+            "succeeded": succeeded,
+            "failed": len(entries) - succeeded,
+            "results": results,
+        })
+
     async def handle_api_send(self, request: web.Request) -> web.Response:
         if not self._auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -1505,11 +1633,11 @@ class AgentRelay:
                 result = await spawn_agent(talk_cfg, adapter, message)
             ok = result.get("exit_code", 1) == 0
             return web.json_response({"ok": ok, **result})
-        from relay_client import send_to_peer
+        from relay_client import deliver_to_peer
 
         loop = asyncio.get_running_loop()
         ok, msg = await loop.run_in_executor(
-            None, send_to_peer, self.cfg, addr, port, message, agent)
+            None, deliver_to_peer, self.cfg, addr, port, message, agent)
         return web.json_response({"ok": ok, "message": msg})
 
     async def handle_api_inbox(self, request: web.Request) -> web.Response:
@@ -1649,6 +1777,7 @@ class AgentRelay:
         app.router.add_post("/api/connect", self.handle_api_connect)
         app.router.add_post("/api/settings", self.handle_api_settings)
         app.router.add_post("/api/send", self.handle_api_send)
+        app.router.add_post("/api/broadcast", self.handle_api_broadcast)
         app.router.add_post("/api/relay/stop", self.handle_api_relay_stop)
         app.router.add_get("/api/terminal/sessions", self.handle_api_terminal_sessions)
         app.router.add_get("/api/skills", self.handle_api_skills)

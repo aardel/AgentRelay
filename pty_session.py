@@ -127,19 +127,24 @@ class PTYSession:
     # Subscribers                                                          #
     # ------------------------------------------------------------------ #
 
-    async def subscribe(self, ws: Any, owner: bool = False) -> None:
+    async def subscribe(self, ws: Any, owner: bool = False,
+                      include_scrollback: bool = True) -> None:
         """
         Attach a WebSocket as a subscriber.
 
         Immediately sends the scrollback snapshot as an open_ack, then
         streams live output. Pass owner=True to include the write_token.
+        Set include_scrollback=False for a clean terminal (no history replay).
         """
         self._subscribers.add(ws)
+        scrollback_b64 = ""
+        if include_scrollback and self._scrollback:
+            scrollback_b64 = base64.b64encode(bytes(self._scrollback)).decode()
         ack = {
             "type": "open_ack",
             "session_id": self.session_id,
             "write_token": self._write_token if owner else None,
-            "scrollback": base64.b64encode(bytes(self._scrollback)).decode(),
+            "scrollback": scrollback_b64,
         }
         await self._send_ws(ws, ack)
 

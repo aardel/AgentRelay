@@ -302,6 +302,40 @@ el("btn-copy").addEventListener("click", () => {
 
 el("send-target").addEventListener("change", renderSendAgents);
 
+el("btn-broadcast").addEventListener("click", async () => {
+  const message = el("broadcast-message").value.trim();
+  if (!message) {
+    el("broadcast-status").textContent = "Enter a message to broadcast.";
+    return;
+  }
+  const scope = el("broadcast-include-peers").checked ? "all" : "local";
+  el("btn-broadcast").disabled = true;
+  el("broadcast-status").textContent = "Broadcasting…";
+  const { ok, data } = await api("/api/broadcast", {
+    method: "POST",
+    body: JSON.stringify({ message, scope }),
+  });
+  el("btn-broadcast").disabled = false;
+  if (!ok) {
+    el("broadcast-status").textContent = data.error || "Broadcast failed.";
+    return;
+  }
+  const scopeLabel = scope === "all"
+    ? "all local and connected agents"
+    : "all local agents";
+  el("broadcast-status").textContent =
+    `Global broadcast sent to ${data.succeeded}/${data.sent_to} agents (${scopeLabel}).`;
+  setFooter(`Global broadcast: ${data.succeeded}/${data.sent_to} delivered`);
+  if (data.failed > 0 && data.results) {
+    const failed = data.results
+      .filter((r) => !r.ok)
+      .map((r) => `${r.agent}@${r.node}`)
+      .join(", ");
+    el("broadcast-status").textContent += ` Failed: ${failed}`;
+  }
+  el("broadcast-message").value = "";
+});
+
 el("btn-send").addEventListener("click", async () => {
   const target = sendTargets.find((t) => t.name === el("send-target").value);
   const agent = el("send-agent").value;
@@ -326,12 +360,12 @@ el("btn-send").addEventListener("click", async () => {
   if (ok) el("send-message").value = "";
 });
 
-function openAgentTerminal(agent, { injectSnippet = false } = {}) {
+function openAgentTerminal(agent, { injectSnippet = false, reuse = false } = {}) {
   if (!agent) return;
   showView("terminals");
   window.AgentRelayTerminals.openTerminal(agent, API_PORT, AUTH_TOKEN, {
     injectSnippet,
-    reuse: true,
+    reuse,
     yolo: isYoloEnabled(),
   });
 }
@@ -340,8 +374,8 @@ el("btn-new-terminal").addEventListener("click", () => {
   const agent = el("terminal-agent").value;
   if (!agent) return;
   try {
-    openAgentTerminal(agent, { injectSnippet: false });
-    setFooter(`Terminal opened for ${agent}`);
+    openAgentTerminal(agent, { injectSnippet: false, reuse: false });
+    setFooter(`New terminal for ${agent}`);
   } catch (e) {
     setFooter(`Terminal error: ${e.message}`);
   }
@@ -351,7 +385,7 @@ el("btn-launch-agent").addEventListener("click", async () => {
   const agent = el("launch-agent").value;
   if (!agent) return;
   try {
-    openAgentTerminal(agent, { injectSnippet: true });
+    openAgentTerminal(agent, { injectSnippet: true, reuse: true });
     const snip = el("agent-snippet").textContent;
     if (snip) {
       try {
@@ -370,8 +404,8 @@ el("btn-open-terminal").addEventListener("click", () => {
   const agent = el("launch-agent").value;
   if (!agent) return;
   try {
-    openAgentTerminal(agent, { injectSnippet: false });
-    setFooter(`Opened empty terminal for ${agent}`);
+    openAgentTerminal(agent, { injectSnippet: false, reuse: false });
+    setFooter(`Opened fresh terminal for ${agent}`);
   } catch (e) {
     setFooter(`Terminal error: ${e.message}`);
   }

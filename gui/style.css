@@ -289,6 +289,31 @@ textarea { resize: vertical; min-height: 5rem; }
 
 .terminal-panel .xterm { height: 100%; padding: 4px; }
 
+.broadcast-card {
+  border-color: #6e40c9;
+  background: linear-gradient(135deg, #1c2128 0%, #1a1f2e 100%);
+}
+
+.broadcast-banner {
+  font-size: 0.9rem;
+  color: #c4b5fd;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.65rem;
+  background: rgba(110, 64, 201, 0.2);
+  border-radius: 8px;
+  border-left: 3px solid #8b5cf6;
+}
+
+.broadcast-banner strong { color: #e9d5ff; }
+
+.broadcast-card .btn.primary {
+  background: #6e40c9;
+}
+
+.broadcast-card .btn.primary:hover {
+  background: #7c3aed;
+}
+
 .yolo-toggle {
   display: flex;
   align-items: center;
