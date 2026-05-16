@@ -71,12 +71,28 @@ AgentRelay should include terminal panes so agent sessions can be launched and m
 
 SSH should be a first-class connection type alongside relay peer discovery.
 
+### Peer-to-Preset Flow (Designed 2026-05)
+
+When a new relay peer is discovered, AgentRelay offers to save it as an SSH preset in six steps:
+
+1. `handle_peer_announce` receives a node not in `ssh_hosts.json`
+2. Push GUI notification: "New machine WINPC detected — save as SSH host?"
+3. Pre-fill host/IP from peer registry (editable — multi-NIC/NAT may differ)
+4. User enters SSH username and key path
+5. Connectivity test: `ssh -o ConnectTimeout=5 -o BatchMode=yes user@host 'echo ok'`; save blocked on failure
+6. Write entry to `~/.config/agentrelay/ssh_hosts.json`
+
+**Join key:** `node_name` (primary, matches `tasks.target_node` and peer registry) + `machine_id` (drift detector). If `node_name` changes between announces, AgentRelay prompts to update the preset rather than creating a duplicate.
+
+`machine_id` sources: Linux `/etc/machine-id`, Mac `ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID`, Windows `wmic csproduct get UUID`. Included in the peer announce payload.
+
+**Storage:** `~/.config/agentrelay/ssh_hosts.json` (separate from `config.yaml`, `chmod 600`, git-ignored). Keys must be passphrase-less or in `ssh-agent`; no passphrase storage. **Reconnect deduplication:** check for existing preset by `node_name` before firing the notification.
+
 ### SSH Connection Features
 
-- Add/edit/remove SSH hosts.
-- Support password auth and key auth.
-- Store host profiles securely.
-- Test connection button.
+- Add/edit/remove SSH hosts via `ssh_hosts.json`.
+- Key auth only (passphrase-less or via `ssh-agent`).
+- Connectivity test on save.
 - Known-host verification.
 - Remote shell detection.
 - Remote working directory defaults.
@@ -245,11 +261,13 @@ The first implementation pass should focus on high-value foundations.
 
 ### Phase 2
 
+- ~~Task queue and task status tracking.~~ **Done (2026-05)** — SQLite `tasks.db`, full originator+receiver lifecycle, SSE-driven Tasks UI panel, `[attach]` links to running sessions. See [docs/task-queue.md](task-queue.md).
+- ~~Permission profiles (Safe / Project Write / Full Auto).~~ **Done (2026-05)** — `permission_profiles.py` with per-agent CLI flag translation, `--profile` flag on `agent-send`, backward-compat `yolo=True` path. See [docs/permission-profiles.md](permission-profiles.md).
+- SSH preset flow (peer announce → notify → pre-fill → user+key → connectivity test → `ssh_hosts.json`). Join key: `node_name` + `machine_id` fingerprint. See SSH Support section below.
 - Remote agent detection over SSH.
 - Launch remote agents into SSH terminals.
 - Trust levels for peers.
-- Task queue and task status tracking.
-- tmux session integration.
+- tmux session integration (add only when building SSH remote attach, not before).
 - Project-specific launch presets.
 
 ### Phase 3
@@ -283,11 +301,11 @@ Each machine runs the full stack. Remote peers use the relay protocol; remote te
 ## Open Design Questions
 
 - ~~Should the redesigned GUI remain Tkinter, or move to a richer stack such as Qt, Tauri, Electron, or a local web UI?~~ **Resolved:** local web UI in pywebview (see above).
-- Should integrated terminals be implemented directly, or should AgentRelay standardize on tmux sessions first?
-- How should full-auto permissions map to each supported agent CLI?
-- What is the safest default storage for SSH credentials on macOS, Windows, and Linux?
-- Should orchestration be centralized on one coordinator machine or distributed across all paired machines?
-- Should task history live in local files, SQLite, or another embedded database?
+- ~~How should full-auto permissions map to each supported agent CLI?~~ **Resolved:** `permission_profiles.py` with per-agent translation table. See [docs/permission-profiles.md](permission-profiles.md).
+- ~~What is the safest default storage for SSH credentials on macOS, Windows, and Linux?~~ **Resolved:** `ssh_hosts.json` alongside `tasks.db` (separate from `config.yaml`, `chmod 600`, git-ignored). Keys must be passphrase-less or in `ssh-agent` — no passphrase storage. Connectivity tested on save.
+- ~~Should task history live in local files, SQLite, or another embedded database?~~ **Resolved:** SQLite (`tasks.db`, WAL mode). See [docs/task-queue.md](task-queue.md).
+- Should integrated terminals standardize on tmux first, or keep PTY direct? **Current lean:** keep PTY direct; add tmux as optional layer only when building SSH remote attach.
+- Should orchestration be centralized on one coordinator machine or distributed across all paired machines? **Current lean:** wait for real multi-machine usage patterns before deciding — the distributed task queue (each machine tracks its own records, status pushed via relay) may be sufficient.
 
 ## Non-Goals For The First Pass
 

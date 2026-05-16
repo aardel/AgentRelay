@@ -61,16 +61,31 @@ agentrelay-gui
 |---------|----------------|
 | **Launch** | PTY terminal + start agent CLI + paste AgentRelay instructions |
 | **Terminal only** | Blank terminal tab (no auto-start) |
-| **YOLO mode** | Checkbox — adds skip-permissions flags (see below) |
+| **YOLO mode** | Checkbox — full-auto permission profile (see below) |
 | **Skills** | Install `/relay-send`, `/relay-codex`, etc. into your agent |
 | **Terminals** | Multiple tabs; click **×** to close a tab |
 | **Messages** | Incoming work from remote peers |
+| **Tasks** | Live task queue — status, duration, and terminal attach for every routed task |
 
-### YOLO / full-auto mode
+### Permission profiles
 
-Optional checkbox on **Agents** and **Terminals**. When enabled, Launch adds each CLI's skip-permissions flags (e.g. Claude `--dangerously-skip-permissions`, Codex `--dangerously-bypass-approvals-and-sandbox`). **Use only on trusted projects.**
+Three tiers control agent autonomy, selectable per launch or via `--profile` on `agent-send`:
 
-Full reference: [docs/ai-cli-agents-yolo-flags.md](docs/ai-cli-agents-yolo-flags.md)
+| Profile | What it allows |
+|---------|----------------|
+| `safe` | Read-only; confirmations required (default) |
+| `project_write` | Edit current project; approvals for risky actions |
+| `full_auto` | No confirmation prompts (previously "YOLO mode") |
+
+The YOLO checkbox resolves to `full_auto`. **Use only on trusted projects.**
+
+Full flag table per agent CLI: [docs/permission-profiles.md](docs/permission-profiles.md)
+
+### Task queue
+
+Every remote `agent-send` call creates task records on both machines. Track status live in the **Tasks** panel — including a **[attach]** link to open a running agent session's terminal from any machine on the network.
+
+Full details: [docs/task-queue.md](docs/task-queue.md)
 
 ## Daily use (CLI)
 
@@ -82,6 +97,8 @@ Full reference: [docs/ai-cli-agents-yolo-flags.md](docs/ai-cli-agents-yolo-flags
 | Send to a specific agent | `agent-send codex@mac "fix the failing build"` |
 | Send locally | `agent-send claude@local "review this repo"` |
 | Multi-agent local | `agent-send --local --agents claude,codex "compare approaches"` |
+| Send with permission profile | `agent-send --profile project_write claude@WINPC "refactor auth"` |
+| List tasks | `GET http://localhost:9876/api/tasks` |
 
 ## Architecture
 
@@ -89,15 +106,20 @@ Full reference: [docs/ai-cli-agents-yolo-flags.md](docs/ai-cli-agents-yolo-flags
 - **GUI shell** (`agentrelay_gui.py` → `agentrelay_web.py`) — pywebview loading local `gui/`
 - **Single instance** — daemon PID lock (`/tmp/agentrelay.pid`); GUI lock (`/tmp/agentrelay-gui.pid`)
 
+For a concise record of completed work, important files, verification steps,
+and remaining follow-up, see [docs/implementation-summary.md](docs/implementation-summary.md).
+
 ## Project layout
 
 ```
-agentrelay.py          background service
+agentrelay.py          background service (HTTP/WS, PTY sessions, task dispatch)
 agentrelay_gui.py      desktop entry (web UI default)
 agentrelay_web.py      pywebview shell
 relay_client.py        start/stop relay, skills, launch helpers
-gui/                   web UI (HTML/JS + xterm.js terminals)
-docs/                  roadmap, YOLO flags reference
+task_queue.py          SQLite task queue (both-sides tracking, lifecycle enforcement)
+permission_profiles.py  safe/project_write/full_auto with per-agent CLI flag translation
+gui/                   web UI (HTML/JS + xterm.js terminals + Tasks panel)
+docs/                  task-queue.md, permission-profiles.md, roadmap, YOLO flags reference
 scripts/               desktop launchers, build scripts
 ```
 
