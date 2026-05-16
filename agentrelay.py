@@ -991,12 +991,14 @@ class AgentRelay:
             if spec.capabilities:
                 entry["capabilities"] = spec.capabilities
             adapters[name] = entry
+        active_sessions = [s["agent"] for s in pty_registry.list() if s["alive"]]
         return web.json_response({
             "node": self.cfg.node_name,
             "port": self.cfg.port,
             "adapters": adapters,
             "active_agents": list_active_agent_names(),
             "rules": [r.__dict__ for r in self.cfg.rules],
+            "active_sessions": active_sessions,
         })
 
     async def handle_peers(self, request: web.Request) -> web.Response:
@@ -1677,7 +1679,7 @@ class AgentRelay:
                                 continue
                             agent = resolved
                             adapter = self.cfg.adapters[agent]
-                            reuse = bool(frame.get("reuse", True))
+                            reuse = bool(frame.get("reuse", False))
                             session = None
                             created_session = False
                             if reuse:

@@ -146,12 +146,30 @@ async def discover_from_daemon(cfg: dict[str, Any]) -> dict[str, dict]:
         return {}
 
 
+async def _fetch_active_sessions(addr: str, port: int, token: str) -> list[str]:
+    """Return list of active agent names from a node's /info endpoint."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=2)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"http://{addr}:{port}/info",
+                headers={"X-Agent-Token": token},
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("active_sessions") or []
+    except Exception:
+        pass
+    return []
+
+
 async def cmd_list(cfg: dict[str, Any] | None = None,
                    self_name: str | None = None) -> int:
     cfg = cfg or {}
     configured_agents = ",".join((cfg.get("adapters") or {}).keys())
     local_name = cfg.get("node_name") or socket.gethostname().split(".")[0]
     local_port = int(cfg.get("port") or 9876)
+    token = cfg.get("token", "")
 
     daemon_peers = await discover_from_daemon(cfg)
     mdns_peers = await discover(timeout=2.5)
@@ -168,15 +186,26 @@ async def cmd_list(cfg: dict[str, Any] | None = None,
         print("no peers discovered")
         return 1
     me = self_name or socket.gethostname().split(".")[0]
-    print(f"{'node':<20}  {'address':<16}  {'port':<6}  {'agents':<24}  self?")
-    print(f"{'-' * 20}  {'-' * 16}  {'-' * 6}  {'-' * 24}  -----")
-    for node, (addr, port) in sorted(peers.items()):
+
+    # Fetch active PTY sessions from all nodes in parallel
+    node_list = sorted(peers.keys())
+    active_results = await asyncio.gather(
+        *[_fetch_active_sessions(peers[n][0], peers[n][1], token) for n in node_list],
+        return_exceptions=True,
+    )
+    active_by_node: dict[str, list[str]] = {
+        node: (res if isinstance(res, list) else [])
+        for node, res in zip(node_list, active_results)
+    }
+
+    print(f"{'node':<20}  {'address':<16}  {'port':<6}  {'agents (configured)':<36}  {'active (running)':<24}  self?")
+    print(f"{'-' * 20}  {'-' * 16}  {'-' * 6}  {'-' * 36}  {'-' * 24}  -----")
+    for node in node_list:
+        addr, port = peers[node]
         marker = "*" if node == me else ""
-        if node == me:
-            agents = configured_agents
-        else:
-            agents = peer_agents.get(node, "")
-        print(f"{node:<20}  {addr:<16}  {port:<6}  {agents:<24}  {marker}")
+        agents = configured_agents if node == me else peer_agents.get(node, "")
+        active = ",".join(active_by_node.get(node) or [])
+        print(f"{node:<20}  {addr:<16}  {port:<6}  {agents:<36}  {active:<24}  {marker}")
     return 0
 
 

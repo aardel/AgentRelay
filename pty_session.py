@@ -76,11 +76,13 @@ class PTYSession:
 
     async def start(self, cmd: list[str]) -> None:
         """Spawn the agent process inside a PTY."""
+        from pty_env import resolve_pty_argv
+
         self._pty = _PtyBackend(cols=self.cols, rows=self.rows)
         self._pty.on_output(self._handle_output)
         self._write_token = secrets.token_urlsafe(32)
         self._started_at = time.time()
-        await self._pty.start(cmd)
+        await self._pty.start(resolve_pty_argv(cmd))
         asyncio.create_task(self._watch_exit())
 
     async def stop(self) -> None:

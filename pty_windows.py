@@ -18,7 +18,7 @@ if sys.platform != "win32":
 
 import winpty  # pywinpty
 
-from pty_env import terminal_env
+from pty_env import build_pty_env
 
 
 class PtyWindows:
@@ -48,10 +48,11 @@ class PtyWindows:
 
     async def start(self, cmd: list[str]) -> None:
         """Spawn the process inside a ConPTY of the configured size."""
+        env = build_pty_env(self.cols, self.rows)
         self._pty = winpty.PtyProcess.spawn(
             cmd,
             dimensions=(self.rows, self.cols),
-            env=terminal_env(self.cols, self.rows),
+            env=env,
         )
         self._running = True
         self._reader_task = asyncio.create_task(self._read_loop())

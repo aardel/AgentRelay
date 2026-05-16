@@ -252,7 +252,7 @@
     options = options || {};
     const sessionId = options.sessionId || null;
     const injectSnippet = Boolean(options.injectSnippet);
-    const reuse = options.reuse !== false;
+    const reuse = options.reuse === true;
     const yolo = Boolean(options.yolo);
     const profile = options.profile || null;
 
@@ -298,10 +298,15 @@
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 13,
-      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      fontFamily: 'Menlo, Monaco, "Consolas", "Courier New", monospace',
       theme: XTERM_THEME,
       allowTransparency: false,
     });
+    const vtDecoder = new TextDecoder("utf-8", { fatal: false });
+    const writeVt = (b64) => {
+      if (!b64) return;
+      term.write(vtDecoder.decode(b64ToBytes(b64)));
+    };
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(panel);
@@ -352,13 +357,13 @@
           tab.sessionId = frame.session_id;
           tab.writeToken = frame.write_token;
           term.clear();
-          if (frame.scrollback) term.write(b64ToBytes(frame.scrollback));
+          if (frame.scrollback) writeVt(frame.scrollback);
           fitAddon.fit();
           if (typeof options.onOpen === "function") options.onOpen(frame);
           flushPendingForAgent(tab.agent);
           break;
         case "data":
-          if (frame.data) term.write(b64ToBytes(frame.data));
+          if (frame.data) writeVt(frame.data);
           break;
         case "resize_sync":
           break;
