@@ -213,6 +213,7 @@
           term.clear();
           if (frame.scrollback) term.write(b64ToBytes(frame.scrollback));
           fitAddon.fit();
+          if (typeof options.onOpen === "function") options.onOpen(frame);
           flushPendingForAgent(tab.agent);
           break;
         case "data":
@@ -286,5 +287,22 @@
     });
   }
 
-  global.AgentRelayTerminals = { openTerminal, closeTab, deliverToAgent, getActiveSelection, clearActiveTerminal };
+  function sendToActiveTerminal(text) {
+    let sent = false;
+    tabs.forEach((tab) => {
+      if (tab.panel.classList.contains("active")) {
+        sent = sendInput(tab, text) || sent;
+      }
+    });
+    return sent;
+  }
+
+  global.AgentRelayTerminals = {
+    openTerminal,
+    closeTab,
+    deliverToAgent,
+    getActiveSelection,
+    clearActiveTerminal,
+    sendToActiveTerminal,
+  };
 })(window);

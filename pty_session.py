@@ -130,7 +130,8 @@ class PTYSession:
     # ------------------------------------------------------------------ #
 
     async def subscribe(self, ws: Any, owner: bool = False,
-                      include_scrollback: bool = True) -> None:
+                      include_scrollback: bool = True,
+                      extra_ack: dict | None = None) -> None:
         """
         Attach a WebSocket as a subscriber.
 
@@ -148,6 +149,8 @@ class PTYSession:
             "write_token": self._write_token if owner else None,
             "scrollback": scrollback_b64,
         }
+        if extra_ack:
+            ack.update(extra_ack)
         await self._send_ws(ws, ack)
 
     async def unsubscribe(self, ws: Any) -> None:

@@ -642,6 +642,19 @@ el("btn-copy").addEventListener("click", () => {
   setTimeout(() => { el("btn-copy").textContent = "Copy"; }, 2000);
 });
 
+el("btn-send-snippet-terminal").addEventListener("click", () => {
+  const snip = el("agent-snippet").textContent;
+  if (!snip) {
+    setFooter("No agent instructions loaded");
+    return;
+  }
+  const sent = window.AgentRelayTerminals?.sendToActiveTerminal(snip);
+  setFooter(sent
+    ? "Sent AgentRelay instructions to active terminal"
+    : "Open a live terminal tab first");
+  if (sent) showView("terminals");
+});
+
 el("send-target").addEventListener("change", renderSendAgents);
 
 el("btn-broadcast").addEventListener("click", async () => {
@@ -706,7 +719,7 @@ el("btn-clear-send").addEventListener("click", () => {
   el("send-message").value = "";
   el("send-status").textContent = "";
 });
-function openAgentTerminal(agent, { injectSnippet = false, reuse = false } = {}) {
+function openAgentTerminal(agent, { injectSnippet = false, reuse = false, onOpen = null } = {}) {
   if (!agent) return;
   showView("terminals");
   const profile = getLaunchProfile();
@@ -715,6 +728,7 @@ function openAgentTerminal(agent, { injectSnippet = false, reuse = false } = {})
     reuse,
     profile,
     yolo: profile === "full_auto",
+    onOpen,
   });
 }
 
@@ -746,7 +760,15 @@ el("btn-launch-agent").addEventListener("click", async () => {
   const agent = el("launch-agent").value;
   if (!agent) return;
   try {
-    openAgentTerminal(agent, { injectSnippet: true, reuse: true });
+    openAgentTerminal(agent, {
+      injectSnippet: true,
+      reuse: true,
+      onOpen: (frame) => {
+        setFooter(frame.new_session
+          ? `Launched ${agent} — AgentRelay instructions sent to terminal`
+          : `Reattached to ${agent} — existing session left unchanged`);
+      },
+    });
     const snip = el("agent-snippet").textContent;
     if (snip) {
       try {
@@ -755,7 +777,7 @@ el("btn-launch-agent").addEventListener("click", async () => {
         /* clipboard optional */
       }
     }
-    setFooter(`Launched ${agent} — AgentRelay instructions pasted into terminal`);
+    setFooter(`Opening ${agent} terminal`);
   } catch (e) {
     setFooter(`Launch error: ${e.message}`);
   }

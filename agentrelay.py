@@ -1610,6 +1610,7 @@ class AgentRelay:
                                 continue
                             reuse = bool(frame.get("reuse", True))
                             session = None
+                            created_session = False
                             if reuse:
                                 session = pty_registry.find_alive_by_agent(agent)
                             else:
@@ -1627,14 +1628,19 @@ class AgentRelay:
                                     rows=rows,
                                 )
                                 pty_registry.register(session)
+                                created_session = True
                                 yolo = bool(frame.get("yolo", False))
                                 profile = frame.get("profile")
                                 await session.start(
                                     interactive_launch_argv(
                                         agent, adapter, yolo=yolo, profile=profile))
                             await session.subscribe(
-                                ws, owner=True, include_scrollback=reuse)
-                            if frame.get("inject_snippet"):
+                                ws,
+                                owner=True,
+                                include_scrollback=reuse,
+                                extra_ack={"new_session": created_session},
+                            )
+                            if created_session and frame.get("inject_snippet"):
                                 asyncio.create_task(
                                     self._inject_agent_snippet(session))
 
