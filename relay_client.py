@@ -23,9 +23,11 @@ INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
 
 SKILL_TARGETS: dict[str, Path] = {
     "Claude Code": Path.home() / ".claude"  / "commands",
-    "Gemini":      Path.home() / ".gemini"  / "commands",
-    "Codex":       Path.home() / ".codex"   / "commands",
+    "Gemini":      Path.home() / ".gemini"  / "skills",
+    "Codex":       Path.home() / ".codex"   / "skills",
 }
+LEGACY_CODEX_COMMANDS_DIR = Path.home() / ".codex" / "commands"
+LEGACY_GEMINI_COMMANDS_DIR = Path.home() / ".gemini" / "commands"
 
 def claude_commands_dir() -> Path:
     return SKILL_TARGETS["Claude Code"]
@@ -112,8 +114,12 @@ def skill_names(relay_root: Path) -> list[tuple[str, str]]:
 
 
 def is_skill_installed(name: str, target: str) -> bool:
-    commands_dir = SKILL_TARGETS.get(target)
-    return bool(commands_dir and (commands_dir / f"{name}.md").exists())
+    root = SKILL_TARGETS.get(target)
+    if not root:
+        return False
+    if target in ("Codex", "Gemini"):
+        return (root / name / "SKILL.md").exists()
+    return (root / f"{name}.md").exists()
 
 
 def list_skills(relay_root: Path, target: str = "Claude Code") -> list[dict[str, Any]]:
@@ -123,24 +129,91 @@ def list_skills(relay_root: Path, target: str = "Claude Code") -> list[dict[str,
             for n, (lbl, _) in definitions.items()]
 
 
+def _modern_skill_description(name: str, label: str) -> str:
+    if name == "relay-peers":
+        return (
+            "Use when the user asks to list AgentRelay peers, connected computers, "
+            "or available remote agents."
+        )
+    if name == "relay-send":
+        return (
+            "Use when the user asks to send, forward, relay, or delegate work to "
+            "another local or connected AI agent through AgentRelay."
+        )
+    return (
+        f"Use when the user asks to send, forward, relay, or delegate work to "
+        f"{label.removeprefix('Send to ')} through AgentRelay."
+    )
+
+
+def _modern_skill_content(name: str, description: str, instructions: str) -> str:
+    instructions = instructions.replace("$ARGUMENTS", "the user's request")
+    return f"""---
+name: "{name}"
+description: "{description}"
+---
+
+# {name}
+
+Follow these AgentRelay instructions when this skill is triggered. Treat the
+user's request as the message to send, unless the user is only asking to list
+peers.
+
+{instructions}
+"""
+
+
 def install_skill(name: str, relay_root: Path, target: str = "Claude Code") -> str:
-    commands_dir = SKILL_TARGETS.get(target)
-    if not commands_dir:
+    root = SKILL_TARGETS.get(target)
+    if not root:
         return f"Unknown target: {target}"
-    commands_dir.mkdir(parents=True, exist_ok=True)
     definitions = _skill_definitions(relay_root)
     if name not in definitions:
         return f"Unknown skill: {name}"
-    _, content = definitions[name]
-    (commands_dir / f"{name}.md").write_text(content, encoding="utf-8")
+    label, content = definitions[name]
+    if target in ("Codex", "Gemini"):
+        skill_dir = root / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        description = _modern_skill_description(name, label)
+        (skill_dir / "SKILL.md").write_text(
+            _modern_skill_content(name, description, content),
+            encoding="utf-8",
+        )
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / f"{name}.md").write_text(content, encoding="utf-8")
     return f"Installed /{name} for {target}"
 
 
 def remove_skill(name: str, target: str = "Claude Code") -> str:
-    commands_dir = SKILL_TARGETS.get(target)
-    if not commands_dir:
+    root = SKILL_TARGETS.get(target)
+    if not root:
         return f"Unknown target: {target}"
-    path = commands_dir / f"{name}.md"
+    if target in ("Codex", "Gemini"):
+        removed = False
+        skill_dir = root / name
+        skill_path = skill_dir / "SKILL.md"
+        if skill_path.exists():
+            skill_path.unlink()
+            removed = True
+
+        # Clean up empty parent directories
+        for d in (skill_dir / "agents", skill_dir):
+            if d.exists() and not any(d.iterdir()):
+                d.rmdir()
+
+        legacy_commands = [
+            LEGACY_CODEX_COMMANDS_DIR / f"{name}.md",
+            LEGACY_GEMINI_COMMANDS_DIR / f"{name}.md"
+        ]
+        for lp in legacy_commands:
+            if lp.exists():
+                lp.unlink()
+                removed = True
+        if removed:
+            return f"Removed /{name} from {target}"
+        return f"/{name} was not installed for {target}"
+    path = root / f"{name}.md"
     if path.exists():
         path.unlink()
         return f"Removed /{name} from {target}"

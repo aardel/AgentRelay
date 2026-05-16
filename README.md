@@ -8,7 +8,7 @@ Connect computers on your home network so your AI agents can work together.
 
 1. Install AgentRelay on each computer.
 2. Open the app and pair with other computers on your LAN.
-3. Install **Skills** (slash commands) into Claude, Codex, or Gemini.
+3. Install **Skills** into Codex, or slash commands into Claude/Gemini.
 4. Use **Launch** to open an agent in an embedded terminal with instructions.
 5. Agents use `agent-send` / `agent-forward` to route work between machines.
 
@@ -62,7 +62,7 @@ agentrelay-gui
 | **Launch** | PTY terminal + start agent CLI + paste AgentRelay instructions |
 | **Terminal only** | Blank terminal tab (no auto-start) |
 | **YOLO mode** | Checkbox — full-auto permission profile (see below) |
-| **Skills** | Install `/relay-send`, `/relay-codex`, etc. into your agent |
+| **Skills** | Install Codex skills or `/relay-send`, `/relay-codex`, etc. slash commands into your agent |
 | **Terminals** | Multiple tabs; click **×** to close a tab |
 | **Messages** | Incoming work from remote peers |
 | **Tasks** | Live task queue — status, duration, and terminal attach for every routed task |
