@@ -753,11 +753,27 @@ class AgentRelay:
         self.azc: AsyncZeroconf | None = None
         self.browser: AsyncServiceBrowser | None = None
         self.service_info: ServiceInfo | None = None
+        from relay_client import log_agent_availability
+
+        log_agent_availability(cfg)
+
+    def _agent_availability_payload(self) -> dict[str, list[dict]]:
+        from relay_client import available_agent_labels, unavailable_agent_labels
+
+        return {
+            "agents": available_agent_labels(self.cfg),
+            "agents_missing": unavailable_agent_labels(self.cfg),
+        }
 
     async def register_mdns(self) -> None:
         self.azc = AsyncZeroconf(ip_version=IPVersion.V4Only)
         addresses = [socket.inet_aton(self._local_ip())]
-        agent_ids = ",".join(self.cfg.adapters.keys())
+        from relay_client import is_adapter_available
+
+        agent_ids = ",".join(
+            name for name, spec in self.cfg.adapters.items()
+            if is_adapter_available(name, spec)
+        )
         self.service_info = ServiceInfo(
             type_=SERVICE_TYPE,
             name=f"{self.cfg.node_name}.{SERVICE_TYPE}",
@@ -930,8 +946,12 @@ class AgentRelay:
     async def handle_info(self, request: web.Request) -> web.Response:
         if not self._auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
+        from relay_client import is_adapter_available
+
         adapters = {}
         for name, spec in self.cfg.adapters.items():
+            if not is_adapter_available(name, spec):
+                continue
             entry: dict = {"mode": spec.mode, "label": spec.label or name}
             if spec.role:
                 entry["role"] = spec.role
@@ -959,7 +979,7 @@ class AgentRelay:
             "node": self.cfg.node_name,
             "address": self._local_ip(),
             "port": self.cfg.port,
-            "agents": self.cfg.agent_labels(),
+            **self._agent_availability_payload(),
             "wait_before_send_seconds": self.cfg.wait_before_send_seconds,
             "trusted_peers": self.cfg.trusted_peers,
             "nearby": self.peers.list(self.cfg.trusted_peers),
@@ -1601,13 +1621,16 @@ class AgentRelay:
                             # Remote viewer — no write_token
                             await session.subscribe(ws, owner=False)
                         else:
-                            adapter = self.cfg.adapters.get(agent)
-                            if not adapter:
+                            resolved = self.cfg.resolve_adapter_name(
+                                agent, prefer_interactive=True)
+                            if not resolved:
                                 await ws.send_str(json.dumps(
                                     {"type": "error", "session_id": None,
                                      "code": "agent_not_found",
                                      "message": f"no adapter for agent '{agent}'"}))
                                 continue
+                            agent = resolved
+                            adapter = self.cfg.adapters[agent]
                             reuse = bool(frame.get("reuse", True))
                             session = None
                             created_session = False
@@ -1619,7 +1642,22 @@ class AgentRelay:
                                     await existing.stop()
                                     pty_registry.remove(existing.session_id)
                             if not session:
-                                from relay_client import interactive_launch_argv
+                                from relay_client import (
+                                    interactive_launch_argv,
+                                    validate_launch_argv,
+                                )
+
+                                yolo = bool(frame.get("yolo", False))
+                                profile = frame.get("profile")
+                                argv = interactive_launch_argv(
+                                    agent, adapter, yolo=yolo, profile=profile)
+                                path_err = validate_launch_argv(argv)
+                                if path_err:
+                                    await ws.send_str(json.dumps(
+                                        {"type": "error", "session_id": None,
+                                         "code": "spawn_failed",
+                                         "message": path_err}))
+                                    continue
 
                                 session = PTYSession(
                                     agent_name=agent,
@@ -1629,11 +1667,22 @@ class AgentRelay:
                                 )
                                 pty_registry.register(session)
                                 created_session = True
-                                yolo = bool(frame.get("yolo", False))
-                                profile = frame.get("profile")
-                                await session.start(
-                                    interactive_launch_argv(
-                                        agent, adapter, yolo=yolo, profile=profile))
+                                try:
+                                    await session.start(argv)
+                                except Exception as exc:
+                                    created_session = False
+                                    pty_registry.remove(session.session_id)
+                                    session = None
+                                    log.warning(
+                                        "PTY spawn failed for %s %r: %s",
+                                        agent, argv, exc)
+                                    await ws.send_str(json.dumps(
+                                        {"type": "error", "session_id": None,
+                                         "code": "spawn_failed",
+                                         "message": (
+                                             f"Could not start {agent}: {exc}"
+                                         )}))
+                                    continue
                             await session.subscribe(
                                 ws,
                                 owner=True,
@@ -1732,7 +1781,7 @@ class AgentRelay:
             "node": self.cfg.node_name,
             "address": self._local_ip(),
             "port": self.cfg.port,
-            "agents": self.cfg.agent_labels(),
+            **self._agent_availability_payload(),
             "nearby": self.peers.list(self.cfg.trusted_peers),
             "wait_before_send_seconds": self.cfg.wait_before_send_seconds,
         }
@@ -1820,9 +1869,12 @@ class AgentRelay:
 
     def _broadcast_agent_entries(self, scope: str) -> list[dict[str, str]]:
         """Build [{node, agent}, ...] for local-only or all connected peers."""
+        from relay_client import is_adapter_available
+
         entries = [
             {"node": self.cfg.node_name, "agent": agent_id}
-            for agent_id in self.cfg.adapters
+            for agent_id, spec in self.cfg.adapters.items()
+            if is_adapter_available(agent_id, spec)
         ]
         if scope != "all":
             return entries

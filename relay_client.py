@@ -518,6 +518,21 @@ def approve_request(cfg: Config, config_path: Path,
     save_raw(data, config_path)
 
 
+def validate_launch_argv(argv: list[str]) -> str | None:
+    """Return an error message if argv[0] is not on PATH, else None."""
+    import shutil
+
+    if not argv:
+        return "empty launch command"
+    exe = argv[0]
+    if shutil.which(exe):
+        return None
+    return (
+        f"'{exe}' was not found on PATH. "
+        f"Install the {exe} CLI or add it to your PATH, then try again."
+    )
+
+
 def interactive_launch_argv(
     adapter_id: str,
     adapter,
@@ -554,6 +569,56 @@ def interactive_launch_argv(
             cleaned.append(p)
         argv = cleaned if cleaned else [adapter_id]
     return apply_profile_flags(argv, adapter_id, resolved)
+
+
+def is_adapter_available(adapter_id: str, adapter) -> bool:
+    """True when the adapter's launch executable is on PATH."""
+    argv = interactive_launch_argv(adapter_id, adapter)
+    return validate_launch_argv(argv) is None
+
+
+def available_agent_labels(cfg) -> list[dict]:
+    """Agent labels for adapters whose CLI is installed and on PATH."""
+    out: list[dict] = []
+    for entry in cfg.agent_labels():
+        spec = cfg.adapters[entry["id"]]
+        if is_adapter_available(entry["id"], spec):
+            out.append({**entry, "available": True})
+    return out
+
+
+def unavailable_agent_labels(cfg) -> list[dict]:
+    """Configured adapters that are not available on this machine."""
+    out: list[dict] = []
+    for entry in cfg.agent_labels():
+        spec = cfg.adapters[entry["id"]]
+        if not is_adapter_available(entry["id"], spec):
+            argv = interactive_launch_argv(entry["id"], spec)
+            exe = argv[0] if argv else entry["id"]
+            out.append({
+                **entry,
+                "available": False,
+                "executable": exe,
+                "reason": f"'{exe}' not found on PATH",
+            })
+    return out
+
+
+def log_agent_availability(cfg) -> None:
+    """Log which configured agents are available at startup."""
+    import logging
+
+    log = logging.getLogger("agentrelay")
+    for name, spec in cfg.adapters.items():
+        argv = interactive_launch_argv(name, spec)
+        exe = argv[0] if argv else name
+        if is_adapter_available(name, spec):
+            log.info("Agent available: %s (%s)", name, exe)
+        else:
+            log.warning(
+                "Agent not available: %s — install '%s' or add it to PATH",
+                name, exe,
+            )
 
 
 def _interactive_launch_command(adapter_id: str, adapter) -> str:

@@ -1,5 +1,6 @@
 """GUI API routes on the aiohttp app."""
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,7 +18,10 @@ def _minimal_cfg() -> Config:
         "port": 9876,
         "token": "test-token-12345678901234567890",
         "adapters": {
-            "claude": {"command": ["echo", "{prompt}"], "timeout": 5},
+            "claude": {
+                "command": [sys.executable, "-c", "pass"],
+                "timeout": 5,
+            },
         },
         "rules": [],
         "default_action": "approve",
@@ -57,6 +61,9 @@ class GuiApiRoutesTests(unittest.IsolatedAsyncioTestCase):
         data = await resp.json()
         self.assertEqual(data["node"], "testnode")
         self.assertTrue(data["relay_running"])
+        self.assertIn("agents", data)
+        self.assertIn("agents_missing", data)
+        self.assertEqual(data["agents"][0]["id"], "claude")
 
     async def test_forward_resolves_base_agent_to_interactive_sibling(self) -> None:
         cfg = Config.load_dict({

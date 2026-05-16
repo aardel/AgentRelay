@@ -137,22 +137,26 @@ function relayContent(content) {
   setFooter("Content copied to send form");
 }
 
-function renderAgents(agents) {
+function renderAgents(agents, agentsMissing) {
   const ul = el("local-agents");
   const launch = el("launch-agent");
   const termAgent = el("terminal-agent");
   ul.innerHTML = "";
   launch.innerHTML = "";
   termAgent.innerHTML = "";
-  if (!agents.length) {
+  agents = agents || [];
+  agentsMissing = agentsMissing || [];
+
+  if (!agents.length && !agentsMissing.length) {
     ul.innerHTML = "<li>No agents configured</li>";
     return;
   }
+
   for (const a of agents) {
     const li = document.createElement("li");
     const kind = a.mode === "visible" ? "Interactive" : "Background";
     const extra = a.role ? ` · ${a.role}` : "";
-    li.innerHTML = `<strong>${a.label || a.id}</strong><br><span class="hint">${kind}${extra}</span>`;
+    li.innerHTML = `<strong>${a.label || a.id}</strong><br><span class="hint">${kind}${extra} · ready</span>`;
     ul.appendChild(li);
 
     for (const select of [launch, termAgent]) {
@@ -161,6 +165,15 @@ function renderAgents(agents) {
       opt.textContent = a.label || a.id;
       select.appendChild(opt);
     }
+  }
+
+  for (const a of agentsMissing) {
+    const li = document.createElement("li");
+    const kind = a.mode === "visible" ? "Interactive" : "Background";
+    const reason = a.reason || "not on PATH";
+    li.innerHTML = `<strong>${a.label || a.id}</strong><br><span class="hint">${kind} · not installed (${reason})</span>`;
+    li.style.opacity = "0.65";
+    ul.appendChild(li);
   }
 }
 
@@ -341,9 +354,17 @@ async function refresh() {
     ? `On your network at ${data.address}:${data.port || API_PORT}`
     : "";
   el("wait-seconds").value = data.wait_before_send_seconds || 5;
-  renderAgents(data.agents || []);
+  renderAgents(data.agents || [], data.agents_missing || []);
   renderNearby(data.nearby || []);
   renderSendTargets(data);
+
+  if (!data.agents?.length && data.agents_missing?.length) {
+    const names = data.agents_missing.map((a) => a.executable || a.id).join(", ");
+    setFooter(`No agent CLIs on PATH. Install: ${names}`);
+  } else if (data.agents_missing?.length) {
+    const names = data.agents_missing.map((a) => a.label || a.id).join(", ");
+    setFooter(`${data.agents.length} agent(s) ready; not installed: ${names}`);
+  }
 
   const pending = await api("/api/pending");
   renderPending(pending.data.pending || []);
