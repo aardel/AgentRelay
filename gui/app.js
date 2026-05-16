@@ -527,6 +527,112 @@ async function pollDeliveries() {
   }
 }
 
+// ── Tasks panel ──────────────────────────────────────────────────────────────
+
+const TASK_STATUS = {
+  queued:    { label: "queued",    color: "#8b949e" },
+  sent:      { label: "sent",      color: "#2f81f7" },
+  received:  { label: "received",  color: "#58a6ff" },
+  running:   { label: "running",   color: "#d29922" },
+  completed: { label: "done",      color: "#3fb950" },
+  failed:    { label: "failed",    color: "#f85149" },
+};
+
+const TERMINAL_STATUSES = new Set(["completed", "failed"]);
+
+let _taskPollTimer = null;
+let _taskEventSource = null;
+let _tasksInitialized = false;
+
+function initTasksPanel() {
+  if (_tasksInitialized) return;
+  _tasksInitialized = true;
+
+  _taskEventSource = new EventSource(`http://127.0.0.1:${API_PORT}/api/tasks/events`);
+  _taskEventSource.onmessage = () => {
+    clearTimeout(_taskPollTimer);
+    fetchTasks();
+  };
+
+  fetchTasks();
+}
+
+async function fetchTasks() {
+  const { ok, data } = await api("/api/tasks?limit=50");
+  if (!ok) return;
+  renderTasks(data.tasks || []);
+  const hasActive = (data.tasks || []).some((t) => !TERMINAL_STATUSES.has(t.status));
+  clearTimeout(_taskPollTimer);
+  if (hasActive) {
+    _taskPollTimer = setTimeout(fetchTasks, 2000);
+  }
+}
+
+function escHtml(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function relTime(ts) {
+  const d = Math.round(Date.now() / 1000 - ts);
+  if (d < 60) return `${d}s ago`;
+  if (d < 3600) return `${Math.round(d / 60)}m ago`;
+  return `${Math.round(d / 3600)}h ago`;
+}
+
+function fmtDuration(secs) {
+  if (secs < 60) return `${Math.round(secs)}s`;
+  return `${Math.floor(secs / 60)}m ${Math.round(secs % 60)}s`;
+}
+
+function renderTasks(tasks) {
+  const tbody = el("tasks-tbody");
+  if (!tasks.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="tasks-empty">No tasks yet — send one from an agent using /relay-send or agent-send.</td></tr>';
+    return;
+  }
+  const now = Date.now() / 1000;
+  tbody.innerHTML = tasks.map((t) => {
+    const cfg = TASK_STATUS[t.status] || { label: t.status, color: "#8b949e" };
+    const badge = `<span class="task-badge" style="--task-color:${cfg.color}">${cfg.label}</span>`;
+    const duration = TERMINAL_STATUSES.has(t.status)
+      ? fmtDuration(t.updated_at - t.created_at)
+      : t.status === "running"
+        ? fmtDuration(now - t.created_at) + "…"
+        : "—";
+    const msg = (t.message || "").length > 55
+      ? escHtml(t.message.slice(0, 55)) + "…"
+      : escHtml(t.message || "");
+    const sessionCell = t.session_id
+      ? `<a href="#" class="task-attach" data-session="${escHtml(t.session_id)}" data-agent="${escHtml(t.target_agent)}">[attach]</a>`
+      : "—";
+    return `<tr>
+      <td>${badge}</td>
+      <td>${escHtml(t.target_node)}</td>
+      <td>${escHtml(t.target_agent)}</td>
+      <td class="task-msg" title="${escHtml(t.message)}">${msg}</td>
+      <td>${relTime(t.created_at)}</td>
+      <td>${duration}</td>
+      <td>${sessionCell}</td>
+    </tr>`;
+  }).join("");
+
+  tbody.querySelectorAll(".task-attach").forEach((a) => {
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      showView("terminals");
+      window.AgentRelayTerminals?.openTerminal(
+        a.dataset.agent, API_PORT, AUTH_TOKEN, { sessionId: a.dataset.session, reuse: false });
+    });
+  });
+}
+
+document.querySelector('.nav-item[data-view="tasks"]')
+  ?.addEventListener("click", initTasksPanel);
+
+el("btn-tasks-refresh")?.addEventListener("click", fetchTasks);
+
 refresh();
 refreshSkills();
 setInterval(refresh, 5000);

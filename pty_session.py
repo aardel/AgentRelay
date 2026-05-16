@@ -92,6 +92,8 @@ class PTYSession:
             await self._pty.stop()
         await self._broadcast({"type": "closed", "session_id": self.session_id,
                                "reason": "owner_closed"})
+        if self._on_close:
+            self._on_close(self.session_id, "owner_closed")
 
     # ------------------------------------------------------------------ #
     # Write / resize                                                       #
@@ -209,6 +211,8 @@ class PTYSession:
             await self._broadcast({"type": "closed", "session_id": self.session_id,
                                    "reason": "process_exited"})
             pty_registry.remove(self.session_id)
+            if self._on_close:
+                self._on_close(self.session_id, "process_exited")
 
 
 # ---------------------------------------------------------------------------

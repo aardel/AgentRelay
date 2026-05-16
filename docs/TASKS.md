@@ -18,22 +18,48 @@
 - [x] **Permission profiles** — `safe` / `project_write` / `full_auto` with per-agent CLI flag translation, backward-compat `yolo=True` path ([docs/permission-profiles.md](permission-profiles.md))
 - [x] `agent-send --profile` flag
 - [x] `/api/tasks`, `/api/tasks/{id}`, `/api/tasks/{id}/status`, `/api/profiles` endpoints
+- [x] **Task wiring** — originator creates + updates task records in `agent-send`; receiver wiring in `handle_forward`, PTY `mark_running`, `_on_close` completion hook
+- [x] **SSH host presets** — `ssh_hosts.py` with `SSHHostStore`, `get_machine_id()`, `test_ssh_connectivity()`
+- [x] **Peer-to-preset flow** — `machine_id` in `/peer-announce`, `handle_peer_announce` drives pending-preset notifications
+- [x] **SSH host API** — `GET/POST /api/ssh-hosts`, `DELETE /api/ssh-hosts/{node}`, `/test`, `/rename`, `/pending-presets`
 
-## In Progress / Next
+## Active Backlog
 
-- [ ] SSH preset flow: peer announce → GUI notification → pre-fill host → SSH user+key → connectivity test → write `ssh_hosts.json`
-  - Join key: `node_name` (primary) + `machine_id` fingerprint (drift detector)
-  - `machine_id` sources: Linux `/etc/machine-id`, Mac `ioreg IOPlatformUUID`, Windows `wmic csproduct get UUID`
-  - Include `machine_id` in peer announce payload
-  - Reconnect deduplication: check existing preset before firing notification
-- [ ] Project launch presets (name, target_node, agent, profile, message_template)
-- [ ] Remote agent detection over SSH
+### Phase 2 (SSH + remote agents)
 
-## Backlog
+- [ ] **SSH host GUI** — Machines/SSH view with preset list, add-host dialog (node_name, host, user, key_path), connectivity status
+- [ ] "New peer — save as SSH target?" notification in GUI (polls `/api/ssh-hosts/pending-presets`)
+- [ ] Rename prompt when `machine_id` drift detected
+- [ ] Remote agent detection over SSH (`which claude`, `which codex`, etc.)
+- [ ] Launch remote agents into SSH terminal tabs
+- [ ] Trust levels for peers (read-only, trusted, full-auto)
+- [ ] Project-specific launch presets
+
+### Phase 2 (cleanup)
 
 - [ ] Retire Tkinter UI (`--tk`) when web UI has full parity
 - [ ] `project_write` flag coverage for claude (use `--allowedTools` allowlist)
+- [ ] Remote read-only terminal attach from peer machines (WebSocket attach to `session_id`)
 - [ ] tmux integration (add as optional layer when building SSH remote attach, not before)
 - [ ] Centralized vs distributed orchestration (revisit after real multi-machine workflows)
-- [ ] PyInstaller bundles include all new modules + `gui/` assets
 - [ ] `install.ps1`: copy `config.yaml` template into install dir for Windows
+- [ ] PyInstaller bundles include all new modules + `gui/` assets
+
+### Phase 3
+
+- [ ] Workflow builder
+- [ ] Remote AgentRelay install/start over SSH
+- [ ] File sync support
+- [ ] Rich transcript viewer
+- [ ] Policy file support (`.agentrelay-policy.yaml`)
+- [ ] Full orchestration dashboard
+
+## Testing Checklist (post-build)
+
+- [ ] `python -m pytest tests/` green on both WINPC and Mac
+- [ ] Task queue: send a task via `agent-send`, confirm originator + receiver records in `tasks.db`
+- [ ] SSE: open Tasks panel in GUI, send a task, confirm status badge updates without refresh
+- [ ] `[attach]` link: click on a running task's session ID, confirm terminal opens
+- [ ] Permission profiles: `agent-send --profile full_auto target "msg"`, confirm flag in agent argv
+- [ ] SSH preset: save a preset, confirm connectivity test blocks on bad key
+- [ ] `machine_id` drift: rename a peer's `node_name`, confirm rename prompt appears in pending-presets

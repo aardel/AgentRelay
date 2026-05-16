@@ -54,6 +54,8 @@ from gui_paths import gui_directory
 from pairing import PairingManager
 from talk import ConversationStore
 from pty_session import PTYSession, pty_registry
+from task_queue import TaskQueue
+from ssh_hosts import SSHHost, get_machine_id, get_store as get_ssh_store, test_ssh_connectivity
 
 SERVICE_TYPE = "_agentrelay._tcp.local."
 INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
@@ -64,11 +66,60 @@ AUTO_ALLOWLIST = {"uname", "hostname", "whoami", "pwd", "ls", "df", "free",
 
 log = logging.getLogger("agentrelay")
 
+# Persistent task queue (SQLite-backed).  Lazy-init on first use so unit tests
+# can import this module without touching the filesystem.
+_task_queue: TaskQueue | None = None
+
+# SSE subscriber queues — one per connected browser tab watching /api/tasks/events.
+_task_event_queues: list[asyncio.Queue] = []
+
+
+def _notify_task_event(task_id: str, status: str) -> None:
+    """Push a task-changed notification to all SSE subscribers (fire-and-forget)."""
+    payload = {"task_id": task_id, "status": status}
+    for q in list(_task_event_queues):
+        q.put_nowait(payload)
+
+
+def get_task_queue() -> TaskQueue:
+    global _task_queue
+    if _task_queue is None:
+        _task_queue = TaskQueue()
+    return _task_queue
+
+
+async def _push_status_callback(
+    reply_to: str,
+    originator_task_id: str,
+    status: str,
+    *,
+    result: dict | None = None,
+    error: str | None = None,
+) -> None:
+    """POST a status update back to the originating machine."""
+    payload: dict = {"task_id": originator_task_id, "status": status}
+    if result is not None:
+        payload["result"] = result
+    if error:
+        payload["error"] = error
+    try:
+        import aiohttp
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            await session.post(reply_to, json=payload)
+    except Exception as exc:
+        log.warning("status callback to %s failed: %s", reply_to, exc)
+
+
 # Deliveries queued for the GUI app to type into the agent window.
 # Used on Windows where the GUI process has foreground activation permission
 # and can focus windows reliably (unlike the daemon, which can't when
 # Chrome Remote Desktop or another remote session holds focus).
 _gui_delivery_queue: list[dict] = []
+
+# Peers seen via /peer-announce that have no saved SSH preset yet.
+# GUI polls /api/ssh-hosts/pending-presets and clears on read.
+_pending_ssh_presets: list[dict] = []
 
 # Inbox: all incoming dispatches stored here so skills can poll for replies.
 # Capped at 200 entries; oldest are dropped when full.
@@ -401,6 +452,20 @@ async def spawn_agent(cfg: Config, adapter: AdapterConfig,
     return await run_subprocess(cmd, timeout=adapter.timeout)
 
 
+async def _on_session_closed(
+    tq: TaskQueue,
+    local_task_id: str,
+    originator_task_id: str,
+    reply_to: str,
+    reason: str,
+) -> None:
+    """Mark the local task complete/failed and push status back to originator."""
+    status = "failed" if reason == "owner_closed" else "completed"
+    await tq.update_status(local_task_id, status)
+    _notify_task_event(local_task_id, status)
+    await _push_status_callback(reply_to, originator_task_id, status)
+
+
 def _find_pty_for_adapter(adapter_name: str) -> PTYSession | None:
     """Return an embedded GUI terminal session for this adapter, if running."""
     session = pty_registry.find_alive_by_agent(adapter_name)
@@ -710,6 +775,7 @@ class AgentRelay:
             "address": local_ip,
             "port": self.cfg.port,
             "agents": agent_ids,
+            "machine_id": get_machine_id(),
         }
         url = f"http://{addr}:{port}/peer-announce"
         try:
@@ -776,8 +842,31 @@ class AgentRelay:
         addr = body.get("address", request.remote)
         port = int(body.get("port", 9876))
         agents = body.get("agents", "")
+        machine_id = body.get("machine_id", "")
         if node and node != self.cfg.node_name:
             self.peers.upsert(node, addr, port, agents=agents)
+            store = get_ssh_store()
+            existing_by_id = store.get_by_machine_id(machine_id) if machine_id else None
+            existing_by_name = store.get(node)
+            if existing_by_id and existing_by_id.node_name != node:
+                # machine_id matches a preset with a different node_name → drift
+                _pending_ssh_presets.append({
+                    "type": "rename",
+                    "old_node_name": existing_by_id.node_name,
+                    "new_node_name": node,
+                    "host": addr,
+                    "machine_id": machine_id,
+                })
+            elif not existing_by_name and not existing_by_id:
+                # New peer with no preset at all
+                already = any(p.get("node_name") == node for p in _pending_ssh_presets)
+                if not already:
+                    _pending_ssh_presets.append({
+                        "type": "new",
+                        "node_name": node,
+                        "host": addr,
+                        "machine_id": machine_id,
+                    })
         return web.json_response({"ok": True})
 
     async def handle_inbox(self, request: web.Request) -> web.Response:
@@ -843,6 +932,14 @@ class AgentRelay:
         from_agent = body.get("from_agent", "")
         to_agent = body.get("to_agent") or self.cfg.default_agent
         message = (body.get("message") or "").strip()
+        originator_task_id: str | None = body.get("task_id")
+        # Prefer explicit reply_to; fall back to deriving from request.remote so
+        # the originator doesn't need to know its own external IP.
+        reply_to: str | None = body.get("reply_to") or (
+            f"http://{request.remote}:{self.cfg.port}"
+            f"/api/tasks/{originator_task_id}/status"
+            if originator_task_id else None
+        )
 
         if not message:
             return web.json_response({"error": "missing message"}, status=400)
@@ -873,6 +970,36 @@ class AgentRelay:
         if len(_dispatch_inbox) > _INBOX_MAX:
             _dispatch_inbox.pop(0)
 
+        # Create a receiver-side task record so both machines track state.
+        tq = get_task_queue()
+        local_task_id = await tq.create(
+            source_node=from_node,
+            source_agent=from_agent or None,
+            target_node=self.cfg.node_name,
+            target_agent=to_agent,
+            message=message,
+            status="received",
+            originator_task_id=originator_task_id,
+            reply_to=reply_to,
+        )
+
+        # If the message landed in an interactive PTY, record the session and
+        # register a close callback that pushes /status back to the originator.
+        pty_session = _find_pty_for_adapter(to_agent)
+        if pty_session:
+            await tq.mark_running(local_task_id, session_id=pty_session.session_id)
+
+            if reply_to and originator_task_id:
+                _oti = originator_task_id
+                _rt = reply_to
+                _ltid = local_task_id
+
+                def _on_pty_close(sid: str, reason: str) -> None:
+                    asyncio.ensure_future(
+                        _on_session_closed(tq, _ltid, _oti, _rt, reason))
+
+                pty_session._on_close = _on_pty_close
+
         notify("AgentRelay",
                f"Request from {from_node}: {message[:50]}")
         ok = result.get("exit_code", 1) == 0 or result.get("status") in (
@@ -881,9 +1008,93 @@ class AgentRelay:
             "ok": ok,
             "node": self.cfg.node_name,
             "agent": to_agent,
+            "task_id": local_task_id,
             "delivery": "forward",
             **result,
         })
+
+    # ------------------------------------------------------------------
+    # Task queue API
+    # ------------------------------------------------------------------
+
+    async def handle_tasks_list(self, request: web.Request) -> web.Response:
+        """GET /api/tasks — list tasks. Localhost-only."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        qs = request.rel_url.query
+        tasks = await get_task_queue().list_tasks(
+            status=qs.get("status") or None,
+            target_node=qs.get("target_node") or None,
+            source_node=qs.get("source_node") or None,
+            limit=int(qs.get("limit", 100)),
+            since=float(qs.get("since", 0)),
+        )
+        return web.json_response({"tasks": tasks})
+
+    async def handle_task_get(self, request: web.Request) -> web.Response:
+        """GET /api/tasks/{id} — get one task. Localhost-only."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        task = await get_task_queue().get(request.match_info["id"])
+        if not task:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response(task)
+
+    async def handle_task_status(self, request: web.Request) -> web.Response:
+        """POST /api/tasks/{id}/status — receive a status callback from a peer."""
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        task_id = request.match_info["id"]
+        status = body.get("status", "")
+        if not status:
+            return web.json_response({"error": "missing status"}, status=400)
+        tq = get_task_queue()
+        ok = await tq.update_status(
+            task_id, status,
+            result=body.get("result"),
+            error=body.get("error"),
+        )
+        if not ok:
+            task = await tq.get(task_id)
+            if not task:
+                return web.json_response({"error": "not found"}, status=404)
+            return web.json_response(
+                {"error": f"invalid transition from '{task['status']}' to '{status}'"}, status=409)
+        _notify_task_event(task_id, status)
+        return web.json_response({"ok": True, "task_id": task_id, "status": status})
+
+    async def handle_task_events(self, request: web.Request) -> web.StreamResponse:
+        """GET /api/tasks/events — SSE stream. Localhost-only. Pushes on any task state change."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        resp = web.StreamResponse()
+        resp.headers["Content-Type"] = "text/event-stream"
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["X-Accel-Buffering"] = "no"
+        await resp.prepare(request)
+        q: asyncio.Queue = asyncio.Queue()
+        _task_event_queues.append(q)
+        try:
+            # Send a keep-alive comment every 15 s so the browser doesn't time out.
+            while True:
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=15)
+                    await resp.write(
+                        f"data: {json.dumps(payload)}\n\n".encode())
+                except asyncio.TimeoutError:
+                    await resp.write(b": keep-alive\n\n")
+        except (asyncio.CancelledError, ConnectionResetError):
+            pass
+        finally:
+            try:
+                _task_event_queues.remove(q)
+            except ValueError:
+                pass
+        return resp
 
     async def handle_pair_request(self, request: web.Request) -> web.Response:
         try:
@@ -1704,6 +1915,129 @@ class AgentRelay:
             return web.json_response({"error": "unauthorized"}, status=401)
         return web.json_response({"sessions": pty_registry.list()})
 
+    async def handle_api_profiles(self, request: web.Request) -> web.Response:
+        """GET /api/profiles — return permission profile definitions. Localhost-only."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        from permission_profiles import profile_summary
+        return web.json_response({"profiles": profile_summary()})
+
+    # ---- SSH host preset API ----
+
+    async def handle_api_ssh_hosts(self, request: web.Request) -> web.Response:
+        """GET /api/ssh-hosts — list saved SSH presets. Localhost-only."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        store = get_ssh_store()
+        return web.json_response({"hosts": [h.to_dict() for h in store.list()]})
+
+    async def handle_api_ssh_hosts_save(self, request: web.Request) -> web.Response:
+        """POST /api/ssh-hosts — save a new or updated SSH preset.
+
+        Body: {node_name, host, user, port?, key_path?, machine_id?}
+        Runs connectivity test before saving. Returns {ok, message}.
+        """
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        node_name = (body.get("node_name") or "").strip()
+        host = (body.get("host") or "").strip()
+        user = (body.get("user") or "").strip()
+        if not node_name or not host or not user:
+            return web.json_response(
+                {"error": "node_name, host, and user are required"}, status=400)
+
+        port = int(body.get("port") or 22)
+        key_path = (body.get("key_path") or "").strip()
+        machine_id = (body.get("machine_id") or "").strip()
+
+        ok, msg = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: test_ssh_connectivity(host, user, port, key_path))
+        if not ok:
+            return web.json_response({"ok": False, "message": f"connectivity test failed: {msg}"})
+
+        store = get_ssh_store()
+        import time as _time
+        ssh_host = SSHHost(
+            node_name=node_name,
+            host=host,
+            user=user,
+            port=port,
+            key_path=key_path,
+            machine_id=machine_id,
+            last_ok=_time.time(),
+        )
+        store.save(ssh_host)
+
+        # Remove from pending list now that it's been saved
+        _pending_ssh_presets[:] = [
+            p for p in _pending_ssh_presets
+            if p.get("node_name") != node_name and p.get("new_node_name") != node_name
+        ]
+        return web.json_response({"ok": True, "message": msg})
+
+    async def handle_api_ssh_host_delete(self, request: web.Request) -> web.Response:
+        """DELETE /api/ssh-hosts/{node} — remove an SSH preset. Localhost-only."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        node = request.match_info["node"]
+        store = get_ssh_store()
+        deleted = store.delete(node)
+        return web.json_response({"ok": deleted})
+
+    async def handle_api_ssh_host_test(self, request: web.Request) -> web.Response:
+        """POST /api/ssh-hosts/{node}/test — re-test connectivity for a saved preset."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        node = request.match_info["node"]
+        store = get_ssh_store()
+        host = store.get(node)
+        if not host:
+            return web.json_response({"error": "preset not found"}, status=404)
+        ok, msg = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: test_ssh_connectivity(
+                host.host, host.user, host.port, host.key_path))
+        if ok:
+            store.update_last_ok(node)
+        return web.json_response({"ok": ok, "message": msg})
+
+    async def handle_api_ssh_host_rename(self, request: web.Request) -> web.Response:
+        """POST /api/ssh-hosts/{node}/rename — apply a drift-detected rename."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        node = request.match_info["node"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        new_name = (body.get("new_node_name") or "").strip()
+        if not new_name:
+            return web.json_response({"error": "new_node_name required"}, status=400)
+        store = get_ssh_store()
+        ok = store.rename_node(node, new_name)
+        if ok:
+            _pending_ssh_presets[:] = [
+                p for p in _pending_ssh_presets
+                if not (p.get("type") == "rename" and p.get("old_node_name") == node)
+            ]
+        return web.json_response({"ok": ok})
+
+    async def handle_api_ssh_pending(self, request: web.Request) -> web.Response:
+        """GET /api/ssh-hosts/pending-presets — pending save/rename notifications.
+
+        Clears on read so the GUI only sees each notification once.
+        Localhost-only; no auth needed.
+        """
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        items = list(_pending_ssh_presets)
+        _pending_ssh_presets.clear()
+        return web.json_response({"pending": items})
+
     async def handle_api_skills(self, request: web.Request) -> web.Response:
         if not self._auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -1817,11 +2151,22 @@ class AgentRelay:
         app.router.add_post("/api/broadcast", self.handle_api_broadcast)
         app.router.add_post("/api/relay/stop", self.handle_api_relay_stop)
         app.router.add_get("/api/terminal/sessions", self.handle_api_terminal_sessions)
+        app.router.add_get("/api/profiles", self.handle_api_profiles)
         app.router.add_get("/api/skills", self.handle_api_skills)
         app.router.add_post("/api/skills/install", self.handle_api_skills_install)
         app.router.add_post("/api/skills/remove", self.handle_api_skills_remove)
         app.router.add_post("/api/skills/install-all", self.handle_api_skills_install_all)
         app.router.add_post("/api/skills/remove-all", self.handle_api_skills_remove_all)
+        app.router.add_get("/api/tasks", self.handle_tasks_list)
+        app.router.add_get("/api/tasks/events", self.handle_task_events)
+        app.router.add_get("/api/tasks/{id}", self.handle_task_get)
+        app.router.add_post("/api/tasks/{id}/status", self.handle_task_status)
+        app.router.add_get("/api/ssh-hosts", self.handle_api_ssh_hosts)
+        app.router.add_post("/api/ssh-hosts", self.handle_api_ssh_hosts_save)
+        app.router.add_get("/api/ssh-hosts/pending-presets", self.handle_api_ssh_pending)
+        app.router.add_delete("/api/ssh-hosts/{node}", self.handle_api_ssh_host_delete)
+        app.router.add_post("/api/ssh-hosts/{node}/test", self.handle_api_ssh_host_test)
+        app.router.add_post("/api/ssh-hosts/{node}/rename", self.handle_api_ssh_host_rename)
         return app
 
 

@@ -261,7 +261,8 @@ async def cmd_coordinate_local(
 async def cmd_send(token: str, target: str, command: str,
                    agent: str | None, policy_hint: str | None,
                    cfg: dict[str, Any] | None = None,
-                   self_name: str | None = None) -> int:
+                   self_name: str | None = None,
+                   profile: str | None = None) -> int:
     cfg = cfg or {}
     # Use daemon registry first (instant, heartbeat-maintained); fall back to mDNS
     daemon_peers = await discover_from_daemon(cfg)
@@ -283,10 +284,28 @@ async def cmd_send(token: str, target: str, command: str,
     if not is_local_target(target, cfg):
         from agentrelay import Config
         from relay_client import deliver_to_peer
+        from task_queue import TaskQueue
+
+        node_name = self_name or cfg.get("node_name") or socket.gethostname().split(".")[0]
+        tq = TaskQueue()
+        task_id = await tq.create(
+            source_node=node_name,
+            target_node=target,
+            target_agent=agent or cfg.get("default_agent") or "claude",
+            message=command,
+            status="queued",
+            permission_profile=profile or "safe",
+        )
 
         ok, msg = deliver_to_peer(
-            Config.load_dict(cfg), addr, port, command, agent)
-        print(json.dumps({"ok": ok, "message": msg, "delivery": "auto"}, indent=2))
+            Config.load_dict(cfg), addr, port, command, agent,
+            task_id=task_id,
+        )
+
+        await tq.update_status(task_id, "sent" if ok else "failed",
+                               error=None if ok else msg)
+        print(json.dumps(
+            {"ok": ok, "message": msg, "task_id": task_id, "delivery": "auto"}, indent=2))
         return 0 if ok else 1
 
     url = f"http://{addr}:{port}/dispatch"
@@ -338,6 +357,9 @@ def main() -> None:
                      help="force the user-approval dialog on target")
     grp.add_argument("--reject", action="store_const", dest="hint",
                      const="reject", help="(test) ask target to reject")
+    p.add_argument("--profile", choices=("safe", "project_write", "full_auto"),
+                   default="safe",
+                   help="permission profile recorded with the task (default: safe)")
     p.add_argument("--broadcast", action="store_true",
                    help="send to all discovered peers (no synthesis)")
     p.add_argument("--local", action="store_true",
@@ -387,7 +409,7 @@ def main() -> None:
 
     sys.exit(asyncio.run(cmd_send(
         token, target, args.command, agent, args.hint, cfg_data,
-        self_name=node_name)))
+        self_name=node_name, profile=args.profile)))
 
 
 if __name__ == "__main__":

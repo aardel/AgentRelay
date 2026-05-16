@@ -431,9 +431,21 @@ def approve_request(cfg: Config, config_path: Path,
     save_raw(data, config_path)
 
 
-def interactive_launch_argv(adapter_id: str, adapter, yolo: bool = False) -> list[str]:
-    """Argv for an interactive PTY session (no {prompt} placeholder)."""
-    from yolo_flags import apply_yolo_flags
+def interactive_launch_argv(
+    adapter_id: str,
+    adapter,
+    yolo: bool = False,
+    profile: str | None = None,
+) -> list[str]:
+    """Argv for an interactive PTY session (no {prompt} placeholder).
+
+    Pass *profile* ("safe" | "project_write" | "full_auto") for explicit
+    control. *yolo=True* is kept for backward compatibility and maps to
+    "full_auto".
+    """
+    from permission_profiles import apply_profile_flags, profile_for_yolo
+
+    resolved = profile if profile else profile_for_yolo(yolo)
 
     parts = [p for p in (adapter.command or []) if p != "{prompt}"]
     if adapter.mode in ("interactive", "interactive_tmux"):
@@ -454,7 +466,7 @@ def interactive_launch_argv(adapter_id: str, adapter, yolo: bool = False) -> lis
                 continue
             cleaned.append(p)
         argv = cleaned if cleaned else [adapter_id]
-    return apply_yolo_flags(argv, adapter_id, yolo)
+    return apply_profile_flags(argv, adapter_id, resolved)
 
 
 def _interactive_launch_command(adapter_id: str, adapter) -> str:
@@ -529,6 +541,8 @@ def forward_to_peer(
     message: str,
     to_agent: str,
     from_agent: str | None = None,
+    task_id: str | None = None,
+    reply_to: str | None = None,
 ) -> tuple[bool, str]:
     """Deliver to a visible agent window on a remote peer via /forward."""
     payload = {
@@ -537,6 +551,10 @@ def forward_to_peer(
         "to_agent": to_agent,
         "message": message,
     }
+    if task_id:
+        payload["task_id"] = task_id
+    if reply_to:
+        payload["reply_to"] = reply_to
 
     async def _post():
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=5)
@@ -566,6 +584,8 @@ def deliver_to_peer(
     port: int,
     message: str,
     agent: str | None = None,
+    task_id: str | None = None,
+    reply_to: str | None = None,
 ) -> tuple[bool, str]:
     """
     Send to a remote peer using /forward for interactive agents, else /dispatch.
@@ -575,7 +595,8 @@ def deliver_to_peer(
         return send_to_peer(cfg, addr, port, message, agent)
     mode = _run(_fetch_peer_adapter_mode(cfg, addr, port, agent))
     if _looks_interactive(agent, mode):
-        return forward_to_peer(cfg, addr, port, message, agent)
+        return forward_to_peer(cfg, addr, port, message, agent,
+                               task_id=task_id, reply_to=reply_to)
     return send_to_peer(cfg, addr, port, message, agent)
 
 

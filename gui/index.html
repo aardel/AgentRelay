@@ -19,6 +19,7 @@
         <button type="button" class="nav-item" data-view="agents">Agents</button>
         <button type="button" class="nav-item" data-view="terminals">Terminals</button>
         <button type="button" class="nav-item" data-view="messages">Messages</button>
+        <button type="button" class="nav-item" data-view="tasks">Tasks</button>
         <button type="button" class="nav-item" data-view="skills">Skills</button>
         <button type="button" class="nav-item" data-view="settings">Settings</button>
       </nav>
@@ -118,6 +119,33 @@
         </header>
         <article class="card">
           <pre id="inbox-log" class="inbox-log"></pre>
+        </article>
+      </section>
+
+      <section id="view-tasks" class="view">
+        <header class="view-header">
+          <h2>Tasks</h2>
+          <button type="button" id="btn-tasks-refresh" class="btn ghost">Refresh</button>
+        </header>
+        <article class="card tasks-card">
+          <div class="tasks-table-wrap">
+            <table class="tasks-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Target</th>
+                  <th>Agent</th>
+                  <th>Message</th>
+                  <th>Age</th>
+                  <th>Duration</th>
+                  <th>Session</th>
+                </tr>
+              </thead>
+              <tbody id="tasks-tbody">
+                <tr><td colspan="7" class="tasks-empty">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
         </article>
       </section>
 
