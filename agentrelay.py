@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import platform
+import atexit
 import re
 import secrets
 import shlex
@@ -1246,6 +1247,23 @@ def main() -> None:
     if "CHANGE_ME" in cfg.token or len(cfg.token) < 16:
         log.error("weak or placeholder token in %s. edit it first.", args.config)
         sys.exit(1)
+
+    pid_file = Path("/tmp/agentrelay.pid")
+    if pid_file.exists():
+        try:
+            existing_pid = int(pid_file.read_text().strip())
+            os.kill(existing_pid, 0)
+            log.error(
+                "agentrelay already running as PID %d — exiting. "
+                "Kill it first or remove %s.",
+                existing_pid, pid_file,
+            )
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pid_file.unlink(missing_ok=True)
+
+    pid_file.write_text(str(os.getpid()))
+    atexit.register(pid_file.unlink, missing_ok=True)
 
     try:
         asyncio.run(amain(cfg))
