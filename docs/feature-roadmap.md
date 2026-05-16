@@ -24,10 +24,12 @@ The current GUI should evolve into a full desktop control surface.
 ### Main Views
 
 - Dashboard: status of this machine, relay service, connected peers, active agents, and recent activity.
+- **Projects:** loaded workspaces (Cursor-style) — repo root, branch, recent files, and delegation targets for the active project.
 - Agents: installed/detected agent CLIs, launch profiles, running sessions, and per-agent settings.
 - Terminals: integrated terminal tabs for local and remote sessions.
 - Machines: local and paired remote computers, trust levels, connection status, SSH details, and capabilities.
 - Orchestration: task routing, multi-agent workflows, queues, and handoffs.
+- **GitHub:** linked repos, PRs, issues, Actions status, and agent tasks tied to branches/commits.
 - Permissions: launch profiles, allowlists, denylists, approval memory, and safety controls.
 - Logs: command history, relay events, forwarded tasks, errors, and session transcripts.
 - Settings: app configuration, network, agent paths, defaults, and backup/export options.
@@ -59,6 +61,53 @@ AgentRelay should include terminal panes so agent sessions can be launched and m
 - Send text to an active terminal session.
 - Launch an agent into a selected terminal.
 - Attach to existing tmux sessions such as `agentrelay-codex`.
+- **Usage strip under each terminal tab** (when the agent supports it) — see below.
+
+### Terminal Usage & Token Estimates
+
+Show a compact **usage bar beneath each agent terminal** (not inside the xterm scrollback) so quota and pacing are visible without parsing raw CLI output.
+
+#### What to display (per session)
+
+| Field | Source | Notes |
+|-------|--------|--------|
+| **Tokens used (session)** | Agent-reported or parsed from stdout | Reset when tab/session restarts |
+| **Tokens remaining** | Agent API/status line if exposed | Hide when unknown |
+| **Context / window size** | Agent-reported max context | e.g. 200k — helps interpret “remaining” |
+| **Estimated time to finish** | Derived | `(remaining_tokens / rolling_tokens_per_minute)` from user’s recent rate on this agent |
+| **Rolling usage rate** | AgentRelay-computed | Exponential moving average of tokens/min over last N minutes of active generation |
+
+#### Agent support matrix (expected)
+
+| Agent | Native usage reporting | Fallback |
+|-------|------------------------|----------|
+| Claude Code | Status/footer when CLI exposes usage | Parse structured status lines if documented |
+| Codex | Session usage when available | Parse `tokens` / rate lines from output |
+| Gemini | Model quota hints if CLI prints them | Same |
+| Custom | Via adapter hook | Manual refresh only |
+
+Adapters declare `usage_reporting: native | parse | none` in config so the UI knows whether to poll, parse PTY output, or show “usage not available.”
+
+#### UI behavior
+
+- Bar sits **below the xterm panel**, one row per terminal tab: `Used 42k · Left ~158k · ~12 min at current pace`.
+- **Pace indicator** — compare current rate to user’s 7-day average for this agent; show “slower / typical / faster than usual.”
+- **Warnings** — soft alert when remaining < 10% of context or estimated finish crosses a user-defined session budget.
+- **Hover / expand** — sparkline of tokens/min for this session; link to Logs for full history.
+- **Multi-machine** — usage is per terminal session on each node; dashboard can sum by project when project workspace is loaded.
+
+#### Implementation approach (proposed)
+
+1. **PTY tap** — optional parser on terminal output stream for known patterns (regex per agent), feeding a `session_usage` struct on the daemon.
+2. **Adapter poll** — for agents with a side-channel status command or JSON status file, poll every 30s while session is active.
+3. **User calibration** — store per-agent `tokens_per_minute` EMA in `~/.config/agentrelay/usage_stats.json` (local only) to improve ETA when the agent does not report remaining tokens (estimate from context size minus parsed usage).
+4. **WebSocket push** — extend `/terminal` or add `/api/sessions/{id}/usage` + SSE so the usage bar updates without polling.
+5. **Privacy** — usage stats stay local unless user opts in to sync across their machines.
+
+#### API (proposed)
+
+- `GET /api/terminal/sessions/{session_id}/usage` — `{ used, remaining, limit, tokens_per_minute, eta_seconds, source }`
+- `GET /api/usage/agents/{agent_id}/history` — rolling averages for dashboard
 
 ### Terminal Backend Options
 
@@ -146,6 +195,72 @@ Future versions can add saved workflow templates:
 - Review code changes.
 - Fix CI failure.
 - Sync project files before task.
+
+## Project Workspace (Cursor-Style)
+
+AgentRelay should let users **load a complete project** as the working context — similar to opening a folder in Cursor — then delegate work to local or remote agents against that project, not only send one-off messages.
+
+### Goals
+
+- One active (or pinned) project per machine defines default `cwd`, git context, and what gets attached to relay tasks.
+- Agents launched from a loaded project start in the project root (or a configured subfolder) with AgentRelay instructions scoped to that repo.
+- Delegation routes subtasks to the right peer/agent (e.g. Mac for iOS, Windows for .NET) while keeping a single project identity across machines.
+
+### Load Project Flow
+
+1. **Open project** — pick a local folder or clone from Git URL; validate git repo (optional but recommended).
+2. **Index lightweight metadata** — root path, default branch, remotes, last commit, dirty/clean status, detected stack (package.json, pyproject.toml, etc.).
+3. **Bind to relay** — store in `~/.config/agentrelay/projects.json` (or per-project `.agentrelay/project.yaml`); show in **Projects** sidebar.
+4. **Launch agents in project context** — PTY sessions use project `cwd`; `agent-send` / tasks include `project_id` and paths relative to root.
+5. **Delegate** — from the Projects view or orchestration panel: assign a task to `codex@WINPC` or `claude@Mac` with project path hints and permission profile.
+
+### Project Features
+
+- Recent and pinned projects list; quick switch (like Cursor’s recent workspaces).
+- Per-project launch presets (default agent, profile, trusted peers for this repo).
+- Per-project rules snippet (coding standards, test command, deploy notes) injected with AgentRelay instructions.
+- Multi-machine project sync: same logical project on Mac + Windows (shared git remote; optional path map when roots differ).
+- Attach project context to tasks (branch, changed files summary, link to GitHub PR/issue when integrated).
+- “Open in agent” actions: send selection, file path, or diff to local/remote agent terminal.
+- Emergency scope: permission profiles respect project root as filesystem boundary where possible.
+
+### Storage (proposed)
+
+- **Registry:** `~/.config/agentrelay/projects.json` — id, name, local_path, remote_paths map, github_repo, last_opened.
+- **Optional in-repo:** `.agentrelay/project.yaml` — team-shared defaults (ignored paths, default agent, CI command).
+
+## GitHub Integration
+
+First-class GitHub support so relay tasks, projects, and agents align with real repo workflow — not a separate “GitHub app,” but hooks into the loaded project and orchestration layer.
+
+### Authentication
+
+- OAuth (device flow or browser) or fine-grained PAT stored in OS keychain / credential store — never in `config.yaml` or git.
+- Scopes: repo read, issues, pull requests, Actions read (write optional, behind explicit opt-in).
+
+### Core Features
+
+- **Link project to GitHub** — `owner/repo` on load or from `git remote get-url origin`.
+- **Repo browser** — branches, default branch, open PRs/issues count on project card.
+- **PR-aware delegation** — “Implement review comments on PR #42” → task includes PR number, head branch, and diff summary for the target agent.
+- **Issue → task** — create or assign relay task from issue title/body; post status/comments back when done (optional).
+- **Actions visibility** — show latest workflow run status on project dashboard; trigger re-run or notify agent on failure (read-first).
+- **Branch context** — agents default to current branch; warn on uncommitted changes before full-auto sessions.
+- **Compare / delegate by platform** — e.g. open PR from Mac agent, run Windows build check on WINPC peer via relay.
+
+### API Surface (proposed)
+
+- `GET/POST /api/projects` — list/load/register projects.
+- `GET /api/projects/{id}/git-status` — branch, dirty files, last commit.
+- `GET/POST /api/github/link` — connect account, list repos for picker.
+- `GET /api/github/repos/{owner}/{repo}/prs|issues|actions` — cached summaries for UI.
+- `POST /api/tasks` — accept optional `project_id`, `github_pr`, `github_issue` fields.
+
+### Safety
+
+- Never exfiltrate tokens to remote peers; GitHub calls stay on the machine that holds the credential.
+- Remote delegation sends **task text + paths**, not GitHub tokens.
+- Audit log records GitHub-linked actions (PR comment, check run) per project.
 
 ## Permission Profiles
 
@@ -271,10 +386,16 @@ The first implementation pass should focus on high-value foundations.
 - Launch remote agents into SSH terminals.
 - Trust levels for peers.
 - tmux session integration (optional layer when building SSH remote attach).
-- Project-specific launch presets.
+- **Load project (MVP)** — open folder, bind `cwd` to terminals/tasks, recent projects list.
+- Project-specific launch presets and per-project AgentRelay rules snippet.
+- **Terminal usage bar (MVP)** — parse or native usage where supported; show used/remaining; basic tokens/min EMA.
 
 ### Phase 3
 
+- **Project workspace (full)** — multi-machine path map, delegate-from-project UI, “open in agent” for files/diffs.
+- **GitHub integration (MVP)** — OAuth/PAT, link repo to project, branch status, PR/issue picker on send.
+- **GitHub integration (full)** — PR/issue-linked tasks, Actions dashboard, optional comment/check updates.
+- **Terminal usage (full)** — ETA from rolling rate, pace vs historical average, warnings, per-project usage totals.
 - Workflow builder.
 - Remote AgentRelay install/start over SSH.
 - File sync support.
@@ -309,6 +430,9 @@ Each machine runs the full stack. Remote peers use the relay protocol; remote te
 - ~~Should task history live in local files, SQLite, or another embedded database?~~ **Resolved:** SQLite (`tasks.db`, WAL mode). See [docs/task-queue.md](task-queue.md).
 - Should integrated terminals standardize on tmux first, or keep PTY direct? **Current lean:** keep PTY direct; add tmux as optional layer only when building SSH remote attach.
 - Should orchestration be centralized on one coordinator machine or distributed across all paired machines? **Current lean:** distributed task queue may be sufficient until real multi-machine workflows emerge.
+- Where should “project rules” live — global, per-project file (`.agentrelay/project.yaml`), or both? **Current lean:** per-project file for team shareability, with global defaults in config.
+- GitHub: OAuth app vs PAT-only for v1? **Current lean:** PAT + keychain for MVP; OAuth device flow when UI login is built.
+- Token ETA when agents do not report `remaining`: trust parsed usage only, or blend with user’s historical tokens/min? **Current lean:** blend with local EMA; show “estimated” badge when not agent-native.
 
 ## Non-Goals For The First Pass
 
