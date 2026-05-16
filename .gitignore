@@ -14,3 +14,6 @@ python-install*.log
 .claude/projects/
 .claude/todos/
 .claude/memory/
+
+.playwright-mcp/
+relay.log
