@@ -401,9 +401,46 @@ async def spawn_agent(cfg: Config, adapter: AdapterConfig,
     return await run_subprocess(cmd, timeout=adapter.timeout)
 
 
+def _find_pty_for_adapter(adapter_name: str) -> PTYSession | None:
+    """Return an embedded GUI terminal session for this adapter, if running."""
+    session = pty_registry.find_alive_by_agent(adapter_name)
+    if session:
+        return session
+    base = adapter_name.split("-", 1)[0]
+    if base != adapter_name:
+        return pty_registry.find_alive_by_agent(base)
+    return None
+
+
+async def _deliver_prompt_to_pty(adapter_name: str, prompt: str,
+                                 wait_seconds: int) -> bool:
+    """Type a prompt into an embedded /terminal PTY session (web GUI)."""
+    session = _find_pty_for_adapter(adapter_name)
+    if not session:
+        return False
+    token = session.grant_write()
+    try:
+        await session.write(prompt, token)
+        await asyncio.sleep(max(1, wait_seconds))
+        await session.write("\r", token)
+    except Exception as exc:
+        log.warning("pty delivery failed for %s: %s", adapter_name, exc)
+        return False
+    return True
+
+
 async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
                                      wait_seconds: int) -> dict[str, Any]:
     """Type the prompt into the active agent window, wait, then press Enter."""
+    if await _deliver_prompt_to_pty(adapter.name, prompt, wait_seconds):
+        return {
+            "status": "sent", "exit_code": 0,
+            "stdout": (
+                f"Delivered to embedded terminal for '{adapter.name}', "
+                f"sent after {wait_seconds}s."),
+            "stderr": "",
+        }
+
     if shutil.which("tmux"):
         session = adapter.session or f"agentrelay-{adapter.name}"
         check = await run_subprocess(

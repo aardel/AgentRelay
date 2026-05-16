@@ -186,5 +186,5 @@ Write-Host ""
 Write-Host "Add this directory to PATH if you want global commands:"
 Write-Host "  $binPath"
 Write-Host ""
-Write-Host "Optional — Desktop shortcut:"
-Write-Host "  .\scripts\install-desktop-launcher.ps1"
+Write-Host "Optional - Desktop shortcut:"
+Write-Host '  .\scripts\install-desktop-launcher.ps1'

@@ -502,9 +502,35 @@ for (const id of ["yolo-mode", "yolo-mode-terminals"]) {
 }
 syncYoloCheckboxes();
 
+async function pollDeliveries() {
+  try {
+    const r = await fetch(`http://127.0.0.1:${API_PORT}/pending-deliveries`);
+    if (!r.ok) return;
+    const data = await r.json();
+    const items = data.deliveries || [];
+    if (!items.length || !window.AgentRelayTerminals?.deliverToAgent) return;
+    for (const item of items) {
+      const agent = item.adapter_name || item.agent;
+      if (!agent || !item.prompt) continue;
+      window.AgentRelayTerminals.deliverToAgent(
+        agent,
+        API_PORT,
+        AUTH_TOKEN,
+        item.prompt,
+        item.wait_seconds || 5,
+      );
+      setFooter(`Delivered message to ${agent} terminal`);
+      showView("terminals");
+    }
+  } catch {
+    /* daemon may be down */
+  }
+}
+
 refresh();
 refreshSkills();
 setInterval(refresh, 5000);
+setInterval(pollDeliveries, 500);
 setInterval(async () => {
   const inbox = await api(`/api/inbox?since=${lastInboxTs}`);
   const messages = inbox.data.messages || [];

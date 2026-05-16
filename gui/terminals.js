@@ -8,6 +8,69 @@
 
   let tabCounter = 0;
   const tabs = new Map();
+  /** @type {{ agent: string, prompt: string, waitSeconds: number }[]} */
+  const pendingDeliveries = [];
+
+  function sendInput(tab, text) {
+    if (!tab || !tab.writeToken || !tab.ws || tab.ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    const bytes = new TextEncoder().encode(text);
+    tab.ws.send(JSON.stringify({
+      type: "input",
+      session_id: tab.sessionId,
+      write_token: tab.writeToken,
+      data: bytesToB64(bytes),
+    }));
+    return true;
+  }
+
+  function injectPrompt(tab, prompt, waitSeconds) {
+    if (!sendInput(tab, prompt)) return false;
+    window.setTimeout(() => sendInput(tab, "\r"), Math.max(1000, waitSeconds * 1000));
+    return true;
+  }
+
+  function flushPendingForAgent(agent) {
+    const rest = [];
+    for (const item of pendingDeliveries) {
+      if (item.agent !== agent) {
+        rest.push(item);
+        continue;
+      }
+      let delivered = false;
+      tabs.forEach((tab) => {
+        if (tab.agent === agent && tab.sessionId && tab.writeToken) {
+          delivered = injectPrompt(tab, item.prompt, item.waitSeconds) || delivered;
+        }
+      });
+      if (!delivered) rest.push(item);
+    }
+    pendingDeliveries.length = 0;
+    pendingDeliveries.push(...rest);
+  }
+
+  /**
+   * Deliver a relay message into an open agent terminal (or queue until open_ack).
+   * @returns {boolean} true if injected or queued for a pending session
+   */
+  function deliverToAgent(agent, port, token, prompt, waitSeconds) {
+    waitSeconds = waitSeconds || 5;
+    let delivered = false;
+    tabs.forEach((tab) => {
+      if (tab.agent === agent && tab.sessionId && tab.writeToken) {
+        delivered = injectPrompt(tab, prompt, waitSeconds) || delivered;
+      }
+    });
+    if (delivered) return true;
+
+    const hasTab = [...tabs.values()].some((t) => t.agent === agent);
+    if (!hasTab) {
+      openTerminal(agent, port, token, { reuse: true, injectSnippet: false });
+    }
+    pendingDeliveries.push({ agent, prompt, waitSeconds });
+    return true;
+  }
 
   function wsUrl(port, token) {
     return `ws://127.0.0.1:${port}/terminal?token=${encodeURIComponent(token)}`;
@@ -148,6 +211,7 @@
           term.clear();
           if (frame.scrollback) term.write(b64ToBytes(frame.scrollback));
           fitAddon.fit();
+          flushPendingForAgent(tab.agent);
           break;
         case "data":
           if (frame.data) term.write(b64ToBytes(frame.data));
@@ -202,5 +266,5 @@
     return id;
   }
 
-  global.AgentRelayTerminals = { openTerminal, closeTab };
+  global.AgentRelayTerminals = { openTerminal, closeTab, deliverToAgent };
 })(window);

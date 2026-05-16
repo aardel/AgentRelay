@@ -23,13 +23,5 @@ if not exist "%CONFIG%" (
   "%ROOT%\.venv\Scripts\python.exe" "%ROOT%\agentrelay.py" --init --config "%CONFIG%"
 )
 
-REM Second instance: open browser to existing UI
-if exist "%TEMP%\agentrelay-gui.pid" (
-  for /f %%i in (%TEMP%\agentrelay-gui.pid) do set GUI_PID=%%i
-  tasklist /FI "PID eq %GUI_PID%" 2>nul | find "%GUI_PID%" >nul && (
-    for /f "tokens=*" %%u in ('"%ROOT%\.venv\Scripts\python.exe" -c "import yaml; c=yaml.safe_load(open(r'%CONFIG%')); print('http://127.0.0.1:%s/?token=%s&port=%s'%%(c['port'],c['token'],c['port']))"') do start "" "%%u"
-    exit /b 0
-  )
-)
-
+REM Single GUI instance (second click opens browser via agentrelay_gui.py PID lock)
 start "" "%ROOT%\.venv\Scripts\pythonw.exe" "%ROOT%\agentrelay_gui.py" --config "%CONFIG%"
