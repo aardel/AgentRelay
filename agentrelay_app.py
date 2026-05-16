@@ -245,6 +245,8 @@ class AgentRelayApp(tk.Tk):
         self.agent_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(ag_row, text="Launch", command=self._on_launch_selected).pack(
             side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(ag_row, text="Open Terminal", command=self._on_open_terminal).pack(
+            side=tk.RIGHT, padx=(6, 0))
 
         # Nearby
         nb = ttk.LabelFrame(self, text="Other computers for pairing", style="Card.TLabelframe", padding=10)
@@ -397,6 +399,30 @@ class AgentRelayApp(tk.Tk):
         self.cfg = Config.load(self.config_path)
         msg = launch_agent(self.cfg, agent_id)
         self.footer.set(msg)
+
+    def _on_open_terminal(self) -> None:
+        label = self.agent_var.get()
+        if not label or not self._agent_ids:
+            self.footer.set("Select an agent first")
+            return
+        labels = list(self.agent_combo["values"])
+        try:
+            idx = labels.index(label)
+            agent_id = self._agent_ids[idx]
+        except (ValueError, IndexError):
+            return
+        if sys.platform != "win32":
+            self.footer.set("Terminal pane: Windows only in this build")
+            return
+        try:
+            from terminal_pane import open_terminal
+            self.cfg = Config.load(self.config_path)
+            open_terminal(agent_id, self.cfg.port, self.cfg.token)
+            self.footer.set(f"Opening terminal for '{agent_id}'…")
+        except ImportError:
+            self.footer.set("pywebview not installed — run: pip install pywebview")
+        except Exception as exc:
+            self.footer.set(f"Terminal error: {exc}")
 
     # ── Skills ────────────────────────────────────────────────────────────────
 
