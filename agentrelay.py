@@ -59,6 +59,14 @@ from ssh_hosts import SSHHost, get_machine_id, get_store as get_ssh_store, test_
 
 SERVICE_TYPE = "_agentrelay._tcp.local."
 INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
+INTERACTIVE_SUFFIXES = ("-interactive", "-visible")
+
+
+def agent_base_name(agent_name: str) -> str:
+    for suffix in INTERACTIVE_SUFFIXES:
+        if agent_name.endswith(suffix):
+            return agent_name[: -len(suffix)]
+    return agent_name
 DEFAULT_PORT = 9876
 DEFAULT_CONFIG = Path.home() / ".config" / "agentrelay" / "config.yaml"
 AUTO_ALLOWLIST = {"uname", "hostname", "whoami", "pwd", "ls", "df", "free",
@@ -270,6 +278,42 @@ class Config:
                 entry["capabilities"] = spec.capabilities
             out.append(entry)
         return out
+
+    def resolve_adapter_name(
+        self,
+        requested: str | None,
+        *,
+        prefer_interactive: bool = False,
+    ) -> str | None:
+        """Resolve base agent names to configured adapter IDs.
+
+        `prefer_interactive=True` is used by visible delivery paths, allowing
+        a request for "gemini" to land in "gemini-interactive" when available.
+        Background paths keep exact adapter behavior first.
+        """
+        if not requested:
+            return None
+
+        if prefer_interactive:
+            exact = self.adapters.get(requested)
+            if exact and exact.mode in INTERACTIVE_MODES:
+                return requested
+            base = agent_base_name(requested)
+            for candidate in (f"{base}-interactive", f"{base}-visible"):
+                spec = self.adapters.get(candidate)
+                if spec and spec.mode in INTERACTIVE_MODES:
+                    return candidate
+
+        if requested in self.adapters:
+            return requested
+
+        base = agent_base_name(requested)
+        if base in self.adapters:
+            return base
+        for candidate in (f"{base}-interactive", f"{base}-visible"):
+            if candidate in self.adapters:
+                return candidate
+        return None
 
 
 # ============================================================
@@ -516,8 +560,8 @@ async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
                 timeout=10,
             )
             await asyncio.sleep(2)
-        check = await run_subprocess(
-            ["tmux", "has-session", "-t", session], timeout=5)
+            check = await run_subprocess(
+                ["tmux", "has-session", "-t", session], timeout=5)
         if check["exit_code"] == 0:
             send = await run_subprocess(
                 ["tmux", "send-keys", "-t", session, prompt], timeout=10)
@@ -930,7 +974,9 @@ class AgentRelay:
 
         from_node = body.get("from_node", "unknown")
         from_agent = body.get("from_agent", "")
-        to_agent = body.get("to_agent") or self.cfg.default_agent
+        requested_agent = body.get("to_agent") or self.cfg.default_agent
+        to_agent = self.cfg.resolve_adapter_name(
+            requested_agent, prefer_interactive=True)
         message = (body.get("message") or "").strip()
         originator_task_id: str | None = body.get("task_id")
         # Prefer explicit reply_to; fall back to deriving from request.remote so
@@ -943,9 +989,9 @@ class AgentRelay:
 
         if not message:
             return web.json_response({"error": "missing message"}, status=400)
-        if not to_agent or to_agent not in self.cfg.adapters:
+        if not to_agent:
             return web.json_response(
-                {"error": f"unknown agent: {to_agent}"}, status=400)
+                {"error": f"unknown agent: {requested_agent}"}, status=400)
 
         adapter = self.cfg.adapters[to_agent]
         if adapter.mode not in INTERACTIVE_MODES:
@@ -1010,6 +1056,8 @@ class AgentRelay:
             "agent": to_agent,
             "task_id": local_task_id,
             "delivery": "forward",
+            "requested_agent": requested_agent,
+            "resolved_agent": to_agent,
             **result,
         })
 

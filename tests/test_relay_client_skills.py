@@ -1,6 +1,7 @@
 """AgentRelay skill installation helpers."""
 
 import tempfile
+import signal
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -42,6 +43,20 @@ class RelayClientSkillsTests(unittest.TestCase):
                 self.assertEqual(msg, "Removed /relay-send from Codex")
                 self.assertFalse((codex_skills / "relay-send" / "SKILL.md").exists())
                 self.assertFalse((legacy_commands / "relay-send.md").exists())
+
+    def test_stop_relay_uses_daemon_pid_file_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "agentrelay.pid"
+            pid_path.write_text("12345", encoding="utf-8")
+            relay_client._daemon_proc = None
+
+            with (
+                patch.object(relay_client, "pid_file_path", return_value=pid_path),
+                patch("os.kill") as kill,
+            ):
+                relay_client.stop_relay(object())
+
+            kill.assert_called_once_with(12345, signal.SIGTERM)
 
 
 if __name__ == "__main__":

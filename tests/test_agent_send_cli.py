@@ -105,11 +105,12 @@ class AgentSendCliTests(unittest.TestCase):
             fake_session.post.return_value = fake_post
             fake_session.__aenter__.return_value = fake_session
 
-            with patch.object(agent_send, "discover", AsyncMock(return_value={})):
-                with patch.object(agent_send.aiohttp, "ClientSession", return_value=fake_session):
-                    with patch("builtins.print"):
-                        rc = await agent_send.cmd_send(
-                            "token", "local", "hello", "codex", None, cfg)
+            with patch.object(agent_send, "discover_from_daemon", AsyncMock(return_value={})):
+                with patch.object(agent_send, "discover", AsyncMock(return_value={})):
+                    with patch.object(agent_send.aiohttp, "ClientSession", return_value=fake_session):
+                        with patch("builtins.print"):
+                            rc = await agent_send.cmd_send(
+                                "token", "local", "hello", "codex", None, cfg)
 
             self.assertEqual(rc, 0)
             self.assertEqual(
@@ -137,10 +138,11 @@ class AgentSendCliTests(unittest.TestCase):
             fake_session.post.return_value = fake_post
             fake_session.__aenter__.return_value = fake_session
 
-            with patch.object(agent_send.aiohttp, "ClientSession", return_value=fake_session):
-                with patch("builtins.print"):
-                    rc = await agent_send.cmd_coordinate_local(
-                        "token", "compare approaches", ["claude", "codex"], None, "parallel", cfg)
+            with patch.object(agent_send, "discover_from_daemon", AsyncMock(return_value={})):
+                with patch.object(agent_send.aiohttp, "ClientSession", return_value=fake_session):
+                    with patch("builtins.print"):
+                        rc = await agent_send.cmd_coordinate_local(
+                            "token", "compare approaches", ["claude", "codex"], None, "parallel", cfg)
 
             self.assertEqual(rc, 0)
             self.assertEqual(

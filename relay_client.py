@@ -14,7 +14,7 @@ from typing import Any
 
 import aiohttp
 
-from agentrelay import DEFAULT_CONFIG, Config
+from agentrelay import DEFAULT_CONFIG, Config, pid_file_path
 from config_io import load_raw, save_raw, update_settings
 
 INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
@@ -322,7 +322,7 @@ def stop_relay(cfg: Config) -> None:
         return
     import os
     import signal
-    pid_file = Path("/tmp/agentrelay.pid")
+    pid_file = pid_file_path()
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
@@ -581,10 +581,46 @@ def send_to_peer(cfg: Config, addr: str, port: int,
         return False, str(e)
 
 
-async def _fetch_peer_adapter_mode(
+def _agent_base(agent: str) -> str:
+    for suffix in ("-interactive", "-visible"):
+        if agent.endswith(suffix):
+            return agent[: -len(suffix)]
+    return agent
+
+
+def resolve_peer_agent_from_info(
+    info: dict,
+    requested_agent: str,
+) -> tuple[str, str | None]:
+    """Resolve a requested adapter to the best peer adapter for delivery.
+
+    Base names such as "gemini" prefer an interactive sibling when the peer
+    advertises one, so `agent-send gemini@MAC ...` reaches the visible session.
+    Exact interactive names remain exact. If no sibling exists, fall back to the
+    requested adapter.
+    """
+    adapters = info.get("adapters") or {}
+    exact = adapters.get(requested_agent) or {}
+    exact_mode = exact.get("mode")
+    if _looks_interactive(requested_agent, exact_mode):
+        return requested_agent, exact_mode
+
+    base = _agent_base(requested_agent)
+    for candidate in (f"{base}-interactive", f"{base}-visible"):
+        if candidate not in adapters:
+            continue
+        spec = adapters.get(candidate) or {}
+        mode = spec.get("mode")
+        if _looks_interactive(candidate, mode):
+            return candidate, mode
+
+    return requested_agent, exact_mode
+
+
+async def _fetch_peer_adapter_resolution(
     cfg: Config, addr: str, port: int, agent: str,
-) -> str | None:
-    """Return adapter mode from peer /info, or None if unavailable."""
+) -> tuple[str, str | None]:
+    """Return resolved adapter name and mode from peer /info."""
     try:
         t = aiohttp.ClientTimeout(total=3)
         async with aiohttp.ClientSession(timeout=t) as session:
@@ -593,12 +629,19 @@ async def _fetch_peer_adapter_mode(
                 headers={"X-Agent-Token": cfg.token},
             ) as resp:
                 if resp.status != 200:
-                    return None
+                    return agent, None
                 info = await resp.json()
-        spec = (info.get("adapters") or {}).get(agent) or {}
-        return spec.get("mode")
+        return resolve_peer_agent_from_info(info, agent)
     except Exception:
-        return None
+        return agent, None
+
+
+async def _fetch_peer_adapter_mode(
+    cfg: Config, addr: str, port: int, agent: str,
+) -> str | None:
+    """Return adapter mode from peer /info, or None if unavailable."""
+    _resolved, mode = await _fetch_peer_adapter_resolution(cfg, addr, port, agent)
+    return mode
 
 
 def _looks_interactive(agent: str, mode: str | None) -> bool:
@@ -666,9 +709,10 @@ def deliver_to_peer(
     """
     if not agent:
         return send_to_peer(cfg, addr, port, message, agent)
-    mode = _run(_fetch_peer_adapter_mode(cfg, addr, port, agent))
-    if _looks_interactive(agent, mode):
-        return forward_to_peer(cfg, addr, port, message, agent,
+    resolved_agent, mode = _run(
+        _fetch_peer_adapter_resolution(cfg, addr, port, agent))
+    if _looks_interactive(resolved_agent, mode):
+        return forward_to_peer(cfg, addr, port, message, resolved_agent,
                                task_id=task_id, reply_to=reply_to)
     return send_to_peer(cfg, addr, port, message, agent)
 

@@ -6,6 +6,7 @@ from relay_client import (
     _looks_interactive,
     deliver_to_peer,
     forward_to_peer,
+    resolve_peer_agent_from_info,
     send_to_peer,
 )
 
@@ -32,6 +33,18 @@ def _cfg() -> Config:
     )
 
 
+def _mock_run_returns(*values):
+    pending = iter(values)
+
+    def _fake_run(awaitable):
+        close = getattr(awaitable, "close", None)
+        if close:
+            close()
+        return next(pending)
+
+    return _fake_run
+
+
 class DeliverToPeerTests(unittest.TestCase):
     def test_looks_interactive_by_mode_and_suffix(self):
         self.assertTrue(_looks_interactive("codex", "interactive"))
@@ -42,10 +55,10 @@ class DeliverToPeerTests(unittest.TestCase):
     def test_deliver_to_peer_uses_forward_for_interactive_agent(self):
         cfg = _cfg()
         with patch("relay_client._run") as run:
-            run.side_effect = [
-                "interactive",
+            run.side_effect = _mock_run_returns(
+                ("codex-interactive", "interactive"),
                 (200, {"ok": True, "status": "queued"}),
-            ]
+            )
             ok, msg = deliver_to_peer(
                 cfg, "192.168.1.186", 9876, "hello", "codex-interactive")
         self.assertTrue(ok)
@@ -54,17 +67,51 @@ class DeliverToPeerTests(unittest.TestCase):
     def test_deliver_to_peer_uses_dispatch_for_headless_agent(self):
         cfg = _cfg()
         with patch("relay_client._run") as run:
-            run.side_effect = [
-                "headless",
+            run.side_effect = _mock_run_returns(
+                ("codex", "headless"),
                 (200, {"exit_code": 0, "stdout": "done"}),
-            ]
+            )
             ok, msg = deliver_to_peer(cfg, "192.168.1.186", 9876, "hello", "codex")
         self.assertTrue(ok)
         self.assertEqual(msg, "done")
 
+    def test_resolve_peer_agent_prefers_interactive_sibling_for_base_name(self):
+        info = {
+            "adapters": {
+                "codex": {"mode": "headless"},
+                "codex-interactive": {"mode": "interactive"},
+            },
+        }
+
+        resolved, mode = resolve_peer_agent_from_info(info, "codex")
+
+        self.assertEqual(resolved, "codex-interactive")
+        self.assertEqual(mode, "interactive")
+
+    def test_resolve_peer_agent_preserves_explicit_headless_when_no_sibling(self):
+        info = {"adapters": {"codex": {"mode": "headless"}}}
+
+        resolved, mode = resolve_peer_agent_from_info(info, "codex")
+
+        self.assertEqual(resolved, "codex")
+        self.assertEqual(mode, "headless")
+
+    def test_deliver_to_peer_forwards_to_resolved_interactive_sibling(self):
+        cfg = _cfg()
+        with patch("relay_client._run") as run:
+            run.side_effect = _mock_run_returns(
+                ("codex-interactive", "interactive"),
+                (200, {"ok": True, "status": "sent"}),
+            )
+            ok, msg = deliver_to_peer(cfg, "192.168.1.186", 9876, "hello", "codex")
+
+        self.assertTrue(ok)
+        self.assertIn("sent", msg.lower())
+
     def test_forward_to_peer_requires_ok_flag(self):
         cfg = _cfg()
-        with patch("relay_client._run", return_value=(200, {"ok": False, "error": "no window"})):
+        with patch("relay_client._run", side_effect=_mock_run_returns(
+            (200, {"ok": False, "error": "no window"}))):
             ok, msg = forward_to_peer(
                 cfg, "192.168.1.186", 9876, "hi", "codex-interactive")
         self.assertFalse(ok)
@@ -76,7 +123,8 @@ class DeliverToPeerTests(unittest.TestCase):
         async def _post():
             return 200, {"exit_code": 0, "status": "ok"}
 
-        with patch("relay_client._run", side_effect=[(200, {"exit_code": 0})]):
+        with patch("relay_client._run", side_effect=_mock_run_returns(
+            (200, {"exit_code": 0}))):
             ok, _ = send_to_peer(cfg, "127.0.0.1", 9876, "ping", "codex")
         self.assertTrue(ok)
 
