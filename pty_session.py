@@ -18,7 +18,6 @@ import secrets
 import sys
 import time
 import uuid
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -36,7 +35,6 @@ else:
 # Session
 # ---------------------------------------------------------------------------
 
-_SCROLLBACK_LINES = 10_000
 _SCROLLBACK_BYTES = 512 * 1024  # 512 KB cap on raw VT bytes
 
 
@@ -198,13 +196,14 @@ class PTYSession:
         await ws.send_str(json.dumps(msg))
 
     async def _watch_exit(self) -> None:
-        """Poll for process exit and broadcast closed when it happens."""
+        """Poll for process exit, broadcast closed, and remove from registry."""
         while self.alive:
             await asyncio.sleep(1)
         if not self._closed:
             self._closed = True
             await self._broadcast({"type": "closed", "session_id": self.session_id,
                                    "reason": "process_exited"})
+            pty_registry.remove(self.session_id)
 
 
 # ---------------------------------------------------------------------------
