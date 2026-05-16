@@ -84,6 +84,7 @@ html, body {
 }
 
 .view-header h2 { font-size: 1.35rem; font-weight: 600; }
+.view-header-desc { font-size: 0.9rem; color: var(--muted); margin-bottom: 1.25rem; margin-top: -0.5rem; }
 
 .grid.two {
   display: grid;

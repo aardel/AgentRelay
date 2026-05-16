@@ -266,5 +266,15 @@
     return id;
   }
 
-  global.AgentRelayTerminals = { openTerminal, closeTab, deliverToAgent };
+  function getActiveSelection() {
+    let selection = "";
+    tabs.forEach((tab) => {
+      if (tab.panel.classList.contains("active")) {
+        selection = tab.term.getSelection();
+      }
+    });
+    return selection;
+  }
+
+  global.AgentRelayTerminals = { openTerminal, closeTab, deliverToAgent, getActiveSelection };
 })(window);

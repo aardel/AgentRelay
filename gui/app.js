@@ -72,6 +72,14 @@ function setRelay(on) {
   el("status-badge").className = on ? "badge on" : "badge off";
 }
 
+function relayContent(content) {
+  el("send-message").value = content;
+  showView("agents");
+  el("send-message").focus();
+  el("send-message").scrollIntoView({ behavior: 'smooth', block: 'center' });
+  setFooter("Content copied to send form");
+}
+
 function renderAgents(agents) {
   const ul = el("local-agents");
   const launch = el("launch-agent");
@@ -214,12 +222,47 @@ function renderPending(list) {
 function renderInbox(messages) {
   const log = el("inbox-log");
   if (!messages.length) {
-    log.textContent = "(no messages yet)";
+    log.innerHTML = '<div class="hint" style="padding:1rem">(no messages yet)</div>';
     return;
   }
-  log.textContent = messages
-    .map((m) => `[${new Date(m.ts * 1000).toLocaleTimeString()}] ${m.from} → ${m.agent || "?"}\n${m.command}`)
-    .join("\n\n---\n\n");
+  log.innerHTML = "";
+  for (const m of messages) {
+    const item = document.createElement("div");
+    item.className = "inbox-item";
+    item.style.marginBottom = "1.5rem";
+    item.style.padding = "0.75rem";
+    item.style.borderBottom = "1px solid var(--border)";
+    
+    const header = document.createElement("div");
+    header.style.display = "flex";
+    header.style.justifyContent = "space-between";
+    header.style.alignItems = "center";
+    header.style.marginBottom = "0.5rem";
+    
+    const meta = document.createElement("span");
+    meta.style.fontSize = "0.8rem";
+    meta.style.color = "var(--muted)";
+    meta.textContent = `[${new Date(m.ts * 1000).toLocaleTimeString()}] ${m.from} → ${m.agent || "?"}`;
+    
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn ghost small";
+    btn.textContent = "Relay to...";
+    btn.addEventListener("click", () => relayContent(m.command));
+    
+    header.appendChild(meta);
+    header.appendChild(btn);
+    
+    const body = document.createElement("div");
+    body.style.whiteSpace = "pre-wrap";
+    body.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, monospace";
+    body.style.fontSize = "0.85rem";
+    body.textContent = m.command;
+    
+    item.appendChild(header);
+    item.appendChild(body);
+    log.appendChild(item);
+  }
   log.scrollTop = log.scrollHeight;
 }
 
@@ -460,7 +503,22 @@ el("btn-coord-run").addEventListener("click", async () => {
   
   if (data.synthesis) {
     el("coord-synthesis-wrap").hidden = false;
-    el("coord-synthesis").textContent = data.synthesis;
+    const synthWrap = el("coord-synthesis");
+    synthWrap.innerHTML = "";
+    
+    const synthPre = document.createElement("div");
+    synthPre.style.whiteSpace = "pre-wrap";
+    synthPre.textContent = data.synthesis;
+    
+    const synthBtn = document.createElement("button");
+    synthBtn.type = "button";
+    synthBtn.className = "btn ghost small";
+    synthBtn.style.marginTop = "0.5rem";
+    synthBtn.textContent = "Relay synthesis...";
+    synthBtn.addEventListener("click", () => relayContent(data.synthesis));
+    
+    synthWrap.appendChild(synthPre);
+    synthWrap.appendChild(synthBtn);
   } else {
     el("coord-synthesis-wrap").hidden = true;
   }
@@ -476,8 +534,12 @@ el("btn-coord-run").addEventListener("click", async () => {
         <span class="coord-result-agent">${res.agent}@${res.node}</span>
         <span class="coord-result-meta">${status}</span>
       </div>
-      <div class="snippet">${escHtml(res.content || "(no response)")}</div>
+      <div class="snippet" style="position:relative">
+        <div class="coord-result-body" style="white-space:pre-wrap">${escHtml(res.content || "(no response)")}</div>
+        <button type="button" class="btn ghost small btn-relay-coord" style="margin-top:0.5rem">Relay response</button>
+      </div>
     `;
+    item.querySelector(".btn-relay-coord").addEventListener("click", () => relayContent(res.content));
     resList.appendChild(item);
   }
 });
@@ -602,6 +664,15 @@ el("btn-new-terminal").addEventListener("click", () => {
   } catch (e) {
     setFooter(`Terminal error: ${e.message}`);
   }
+});
+
+el("btn-relay-selection").addEventListener("click", () => {
+  const selection = window.AgentRelayTerminals?.getActiveSelection();
+  if (!selection) {
+    setFooter("No text selected in terminal");
+    return;
+  }
+  relayContent(selection);
 });
 
 el("btn-launch-agent").addEventListener("click", async () => {
@@ -790,15 +861,30 @@ async function showThread(t) {
   for (const m of data.messages || []) {
     const div = document.createElement("div");
     div.style.marginBottom = "1rem";
-    div.style.padding = "0.5rem";
+    div.style.padding = "0.75rem";
     div.style.borderRadius = "8px";
     div.style.background = m.role === "assistant" ? "rgba(47, 129, 247, 0.1)" : "rgba(255, 255, 255, 0.05)";
+    div.style.border = "1px solid var(--border)";
     
     const header = document.createElement("div");
-    header.style.fontSize = "0.75rem";
-    header.style.color = "var(--muted)";
-    header.style.marginBottom = "0.25rem";
-    header.textContent = `[${new Date(m.ts * 1000).toLocaleTimeString()}] ${m.from_agent}@${m.from_node}:`;
+    header.style.display = "flex";
+    header.style.justifyContent = "space-between";
+    header.style.alignItems = "center";
+    header.style.marginBottom = "0.5rem";
+    
+    const meta = document.createElement("span");
+    meta.style.fontSize = "0.75rem";
+    meta.style.color = "var(--muted)";
+    meta.textContent = `[${new Date(m.ts * 1000).toLocaleTimeString()}] ${m.from_agent}@${m.from_node}:`;
+    
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn ghost small";
+    btn.textContent = "Relay";
+    btn.addEventListener("click", () => relayContent(m.content));
+    
+    header.appendChild(meta);
+    header.appendChild(btn);
     
     const body = document.createElement("div");
     body.style.whiteSpace = "pre-wrap";
