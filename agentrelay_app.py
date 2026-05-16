@@ -500,13 +500,10 @@ class AgentRelayApp(tk.Tk):
             threading.Thread(target=self._deliver, args=(item,), daemon=True).start()
 
     def _deliver(self, item: dict) -> None:
-        """Focus the target agent window and paste the prompt via ctypes.
-
-        The GUI process holds foreground activation permission, so
-        SetForegroundWindow works here even when Chrome Remote Desktop is
-        active (where the daemon's pyautogui path would fail).
-        """
+        """Focus the target agent window and paste the prompt via ctypes (Win32)
+        or tmux send-keys (macOS/Linux)."""
         if sys.platform != "win32":
+            self._deliver_unix(item)
             return
         import ctypes
         import ctypes.wintypes
@@ -592,6 +589,30 @@ class AgentRelayApp(tk.Tk):
 
         label = title_hint or "window"
         self.after(0, lambda: self.footer.set(f"Delivered to '{label}' via GUI"))
+
+    def _deliver_unix(self, item: dict) -> None:
+        """Deliver a prompt on macOS/Linux by pasting into the target tmux session."""
+        import subprocess
+        import time
+
+        prompt = item["prompt"]
+        session = item.get("session") or item.get("title_hint") or "agentrelay-claude"
+        wait_seconds = item.get("wait_seconds", 5)
+
+        escaped = prompt.replace("'", "'\\''")
+        try:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", session, escaped, ""],
+                check=True, timeout=5,
+            )
+            time.sleep(max(1, wait_seconds))
+            subprocess.run(
+                ["tmux", "send-keys", "-t", session, "", "Enter"],
+                check=True, timeout=5,
+            )
+            self.after(0, lambda: self.footer.set(f"Delivered to tmux:{session}"))
+        except Exception as exc:
+            self.after(0, lambda: self.footer.set(f"tmux delivery failed: {exc}"))
 
     # ── Peers ─────────────────────────────────────────────────────────────────
 

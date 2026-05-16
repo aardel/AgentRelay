@@ -66,6 +66,11 @@ log = logging.getLogger("agentrelay")
 # Chrome Remote Desktop or another remote session holds focus).
 _gui_delivery_queue: list[dict] = []
 
+# Inbox: all incoming dispatches stored here so skills can poll for replies.
+# Capped at 200 entries; oldest are dropped when full.
+_dispatch_inbox: list[dict] = []
+_INBOX_MAX = 200
+
 
 def pid_file_path() -> Path:
     return Path(tempfile.gettempdir()) / "agentrelay.pid"
@@ -392,6 +397,14 @@ async def _spawn_interactive_visible(adapter: AdapterConfig, prompt: str,
         session = adapter.session or f"agentrelay-{adapter.name}"
         check = await run_subprocess(
             ["tmux", "has-session", "-t", session], timeout=5)
+        if check["exit_code"] != 0 and adapter.command:
+            await run_subprocess(
+                ["tmux", "new-session", "-d", "-s", session] + list(adapter.command),
+                timeout=10,
+            )
+            await asyncio.sleep(2)
+        check = await run_subprocess(
+            ["tmux", "has-session", "-t", session], timeout=5)
         if check["exit_code"] == 0:
             send = await run_subprocess(
                 ["tmux", "send-keys", "-t", session, prompt], timeout=10)
@@ -639,6 +652,33 @@ class AgentRelay:
         if addrs:
             self.peers.upsert(node, addrs[0], info.port, agents=agents)
 
+    async def _announce_to_peer(self, addr: str, port: int) -> None:
+        """Tell a specific peer our address so they keep us in their registry."""
+        local_ip = self._local_ip()
+        agent_ids = ",".join(self.cfg.adapters.keys())
+        payload = {
+            "node": self.cfg.node_name,
+            "address": local_ip,
+            "port": self.cfg.port,
+            "agents": agent_ids,
+        }
+        url = f"http://{addr}:{port}/peer-announce"
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=5))
+        except Exception:
+            pass
+
+    async def _heartbeat_loop(self, stop: asyncio.Event) -> None:
+        """Every 30s re-announce ourselves to all known peers so they don't drop us."""
+        while not stop.is_set():
+            for peer in list(self.peers.peers.values()):
+                await self._announce_to_peer(peer.address, peer.port)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                pass
+
     async def shutdown(self) -> None:
         log.info("shutting down")
         if self.browser:
@@ -663,6 +703,32 @@ class AgentRelay:
         items = list(_gui_delivery_queue)
         _gui_delivery_queue.clear()
         return web.json_response({"deliveries": items})
+
+    async def handle_peer_announce(self, request: web.Request) -> web.Response:
+        """A remote peer calls this to register/refresh itself in our registry."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        node = body.get("node", "")
+        addr = body.get("address", request.remote)
+        port = int(body.get("port", 9876))
+        agents = body.get("agents", "")
+        if node and node != self.cfg.node_name:
+            self.peers.upsert(node, addr, port, agents=agents)
+        return web.json_response({"ok": True})
+
+    async def handle_inbox(self, request: web.Request) -> web.Response:
+        """Return recent incoming dispatches. Localhost-only. ?since=<ts> filters by timestamp."""
+        if request.remote not in ("127.0.0.1", "::1"):
+            return web.json_response({"error": "localhost only"}, status=403)
+        since = float(request.rel_url.query.get("since", 0))
+        from_node = request.rel_url.query.get("from", "")
+        items = [
+            m for m in _dispatch_inbox
+            if m["ts"] > since and (not from_node or m["from"] == from_node)
+        ]
+        return web.json_response({"messages": items})
 
     async def handle_info(self, request: web.Request) -> web.Response:
         if not self._auth(request):
@@ -826,6 +892,18 @@ class AgentRelay:
         log.info("[%s] from=%s action=%s agent=%s cmd=%r",
                  request_id, sender, action, agent_name, command)
         notify("agentrelay", f"{action} from {sender}: {command[:80]}")
+
+        # Store in inbox so local skills can poll for replies.
+        import time as _time
+        _dispatch_inbox.append({
+            "request_id": request_id,
+            "from": sender,
+            "agent": agent_name,
+            "command": command,
+            "ts": _time.time(),
+        })
+        if len(_dispatch_inbox) > _INBOX_MAX:
+            _dispatch_inbox.pop(0)
 
         result: dict[str, Any]
         if action == "reject":
@@ -1137,6 +1215,8 @@ class AgentRelay:
         app = web.Application(client_max_size=1024 * 1024)
         app.router.add_get("/health", self.handle_health)
         app.router.add_get("/pending-deliveries", self.handle_pending_deliveries)
+        app.router.add_get("/inbox", self.handle_inbox)
+        app.router.add_post("/peer-announce", self.handle_peer_announce)
         app.router.add_get("/info", self.handle_info)
         app.router.add_get("/peers", self.handle_peers)
         app.router.add_post("/dispatch", self.handle_dispatch)
@@ -1265,9 +1345,11 @@ async def amain(cfg: Config) -> None:
         except NotImplementedError:
             pass  # Windows
 
+    heartbeat = asyncio.create_task(relay._heartbeat_loop(stop))
     try:
         await stop.wait()
     finally:
+        heartbeat.cancel()
         await runner.cleanup()
         await relay.shutdown()
 

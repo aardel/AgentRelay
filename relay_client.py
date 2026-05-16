@@ -234,6 +234,16 @@ def stop_relay(cfg: Config) -> None:
     if _daemon_proc and _daemon_proc.poll() is None:
         _daemon_proc.terminate()
         _daemon_proc = None
+        return
+    import os
+    import signal
+    pid_file = Path("/tmp/agentrelay.pid")
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
 
 
 def fetch_setup(cfg: Config, config_path: Path) -> dict[str, Any]:

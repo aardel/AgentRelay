@@ -9,4 +9,8 @@ python-*.exe
 python-install*.log
 *.egg-info/
 .DS_Store
-.claude/
+.claude/settings.json
+.claude/settings.local.json
+.claude/projects/
+.claude/todos/
+.claude/memory/
