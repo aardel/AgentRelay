@@ -35,6 +35,22 @@ class TerminalUsageTests(unittest.TestCase):
         self.assertEqual(data["used"], 1600)
         self.assertEqual(data["tokens_per_minute"], 600.0)
 
+    def test_observe_claude_usage_summary_without_token_counts(self) -> None:
+        usage = TerminalUsage("claude-interactive")
+
+        usage.observe_text(
+            """
+            Claude Code usage
+            5-hour limit: 23% used
+            Resets at 6:00 PM
+            """
+        )
+
+        data = usage.snapshot()
+        self.assertIsNone(data["used"])
+        self.assertEqual(data["summary"], "Claude usage: 23% used | Resets at 6:00 PM")
+        self.assertEqual(data["source"], "parse")
+
 
 if __name__ == "__main__":
     unittest.main()

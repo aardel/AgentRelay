@@ -347,6 +347,9 @@ textarea { resize: vertical; min-height: 5rem; }
 
 .terminal-usage {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   color: var(--muted);
   background: rgba(10, 13, 18, 0.92);
@@ -356,6 +359,29 @@ textarea { resize: vertical; min-height: 5rem; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.terminal-usage-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-usage-refresh {
+  flex: 0 0 auto;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 4px;
+  color: var(--muted);
+  background: rgba(31, 41, 55, 0.72);
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 0.2rem 0.4rem;
+  cursor: pointer;
+}
+
+.terminal-usage-refresh:hover {
+  color: var(--text);
+  border-color: rgba(148, 163, 184, 0.55);
 }
 
 .terminal-usage.warn {

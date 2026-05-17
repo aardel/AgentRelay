@@ -308,7 +308,17 @@
     viewport.className = "terminal-viewport";
     const usageStrip = document.createElement("div");
     usageStrip.className = "terminal-usage";
-    usageStrip.textContent = sessionType === "agent" ? "Usage unavailable" : "SSH session";
+    const usageText = document.createElement("span");
+    usageText.className = "terminal-usage-text";
+    usageText.textContent = sessionType === "agent" ? "Usage unavailable" : "SSH session";
+    usageStrip.appendChild(usageText);
+    const usageRefresh = document.createElement("button");
+    usageRefresh.type = "button";
+    usageRefresh.className = "terminal-usage-refresh";
+    usageRefresh.textContent = "Refresh";
+    usageRefresh.title = "Refresh Claude usage";
+    usageRefresh.hidden = !(sessionType === "agent" && isClaudeAgent(agent));
+    usageStrip.appendChild(usageRefresh);
     panel.appendChild(viewport);
     panel.appendChild(usageStrip);
     const term = new Terminal({
@@ -343,6 +353,7 @@
       sessionType,
       sshNode,
       usageStrip,
+      usageRefresh,
       usageTimer: null,
       host,
       port,
@@ -351,6 +362,7 @@
     });
     tabsEl().appendChild(wrap);
     panelsEl().appendChild(panel);
+    usageRefresh.addEventListener("click", () => requestUsageRefresh(tabs.get(id)));
     activateTab(id);
     fitAddon.fit();
 
@@ -477,6 +489,28 @@
       .catch(() => {});
   }
 
+  function requestUsageRefresh(tab) {
+    if (!tab || tab.sessionType !== "agent" || !tab.sessionId || !isClaudeAgent(tab.agent)) return;
+    setUsageText(tab.usageStrip, "Refreshing usage...");
+    const path = `/api/terminal/sessions/${encodeURIComponent(tab.sessionId)}/usage/refresh`;
+    fetch(httpUrl(tab.host || "127.0.0.1", tab.port, path, tab.token), { method: "POST" })
+      .then((r) => {
+        if (!r.ok) throw new Error("usage refresh failed");
+        window.setTimeout(() => refreshUsage(tab), 800);
+      })
+      .catch(() => setUsageText(tab.usageStrip, "Usage refresh failed"));
+  }
+
+  function isClaudeAgent(agent) {
+    return String(agent || "").toLowerCase().includes("claude");
+  }
+
+  function setUsageText(el, text) {
+    const textEl = el && el.querySelector ? el.querySelector(".terminal-usage-text") : null;
+    if (textEl) textEl.textContent = text;
+    else if (el) el.textContent = text;
+  }
+
   function formatTokens(value, approx) {
     if (value === null || value === undefined) return null;
     if (value >= 1_000_000) return `${approx ? "~" : ""}${(value / 1_000_000).toFixed(1)}m`;
@@ -491,8 +525,13 @@
   }
 
   function renderUsage(el, usage) {
+    if (usage.summary) {
+      setUsageText(el, usage.summary);
+      el.classList.remove("warn");
+      return;
+    }
     if (usage.source === "none" || usage.used === null || usage.used === undefined) {
-      el.textContent = "Usage unavailable";
+      setUsageText(el, "Usage unavailable");
       el.classList.remove("warn");
       return;
     }
@@ -502,7 +541,7 @@
     if (left) parts.push(`Left ${left}`);
     if (eta) parts.push(eta);
     if (usage.tokens_per_minute) parts.push(`${Math.round(usage.tokens_per_minute)}/min`);
-    el.textContent = parts.join(" · ");
+    setUsageText(el, parts.join(" | "));
     const low = (
       usage.remaining !== null
       && usage.remaining !== undefined

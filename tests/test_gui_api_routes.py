@@ -185,6 +185,44 @@ class GuiApiRoutesTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 404)
 
+    async def test_terminal_usage_refresh_sends_claude_usage_command(self) -> None:
+        class FakePty:
+            alive = True
+
+            def __init__(self) -> None:
+                self.writes: list[str] = []
+
+            async def write(self, data: str) -> None:
+                self.writes.append(data)
+
+        headers = {"X-Agent-Token": "test-token-12345678901234567890"}
+        session = PTYSession(agent_name="claude-interactive", node="testnode")
+        fake_pty = FakePty()
+        session._pty = fake_pty
+        pty_registry.register(session)
+
+        resp = await self.client.post(
+            f"/api/terminal/sessions/{session.session_id}/usage/refresh",
+            headers=headers,
+        )
+
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(fake_pty.writes, ["/usage\r"])
+
+    async def test_terminal_usage_refresh_rejects_non_claude_session(self) -> None:
+        headers = {"X-Agent-Token": "test-token-12345678901234567890"}
+        session = PTYSession(agent_name="codex-interactive", node="testnode")
+        pty_registry.register(session)
+
+        resp = await self.client.post(
+            f"/api/terminal/sessions/{session.session_id}/usage/refresh",
+            headers=headers,
+        )
+
+        self.assertEqual(resp.status, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

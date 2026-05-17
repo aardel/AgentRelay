@@ -23,11 +23,17 @@ _REMAINING_PATTERNS = [
     re.compile(r"(?P<value>\d+(?:\.\d+)?\s*[kKmM]?)\s+tokens?\s+(?:left|remaining)", re.I),
 ]
 _LIMIT_PATTERNS = [
-    re.compile(r"(?:context|window|limit)\D{0,24}(?P<value>\d+(?:\.\d+)?\s*[kKmM]?)", re.I),
+    re.compile(r"(?:context|window)\D{0,24}(?P<value>\d+(?:\.\d+)?\s*[kKmM]?)", re.I),
+    re.compile(r"(?:tokens?\s+limit|limit\D{0,12}tokens?)\D{0,24}(?P<value>\d+(?:\.\d+)?\s*[kKmM]?)", re.I),
 ]
 _FRACTION_PATTERNS = [
     re.compile(r"(?P<used>\d+(?:\.\d+)?\s*[kKmM]?)\s*/\s*(?P<limit>\d+(?:\.\d+)?\s*[kKmM]?)\s*(?:tokens?|context|window)?", re.I),
 ]
+_CLAUDE_USAGE_PERCENT_RE = re.compile(
+    r"(?:\d+\s*-\s*hour\s+)?limit\D{0,24}(?P<percent>\d+(?:\.\d+)?)\s*%\s+used",
+    re.I,
+)
+_RESET_RE = re.compile(r"\bresets?\s+(?:at|in)\s+(?P<value>.+)$", re.I)
 
 
 def parse_token_count(value: str) -> int | None:
@@ -58,6 +64,7 @@ class TerminalUsage:
     remaining: int | None = None
     limit: int | None = None
     tokens_per_minute: float | None = None
+    summary: str | None = None
     source: str = "none"
     updated_at: float = 0.0
     _last_used: int | None = field(default=None, init=False, repr=False)
@@ -91,6 +98,7 @@ class TerminalUsage:
                 if self.tokens_per_minute is not None else None
             ),
             "eta_seconds": eta_seconds,
+            "summary": self.summary,
             "source": self.source,
             "updated_at": self.updated_at or None,
         }
@@ -99,10 +107,13 @@ class TerminalUsage:
         if not line.strip():
             return
         lower = line.lower()
+        changed = self._parse_usage_summary(line)
         if not any(word in lower for word in ("token", "context", "window", "limit")):
+            if changed:
+                self.source = "parse"
+                self.updated_at = self.clock()
             return
 
-        changed = False
         fraction_found = False
         for pattern in _FRACTION_PATTERNS:
             match = pattern.search(line)
@@ -135,6 +146,25 @@ class TerminalUsage:
         if changed:
             self.source = "parse"
             self.updated_at = self.clock()
+
+    def _parse_usage_summary(self, line: str) -> bool:
+        percent_match = _CLAUDE_USAGE_PERCENT_RE.search(line)
+        if percent_match:
+            percent = percent_match.group("percent")
+            next_summary = f"Claude usage: {percent}% used"
+            if self.summary != next_summary:
+                self.summary = next_summary
+                return True
+            return False
+
+        reset_match = _RESET_RE.search(line.strip())
+        if reset_match and self.summary:
+            reset = reset_match.group("value").strip()
+            next_summary = f"{self.summary} | Resets at {reset}"
+            if self.summary != next_summary:
+                self.summary = next_summary
+                return True
+        return False
 
     def _set_used(self, value: int | None) -> bool:
         if value is None:

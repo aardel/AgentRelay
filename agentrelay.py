@@ -2397,6 +2397,23 @@ class AgentRelay:
         })
         return web.json_response(usage)
 
+    async def handle_api_terminal_session_usage_refresh(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        session_id = request.match_info["session_id"]
+        session = pty_registry.get(session_id)
+        if not session:
+            return web.json_response({"error": "session not found"}, status=404)
+        if session.session_type != "agent" or "claude" not in session.agent_name.lower():
+            return web.json_response(
+                {"error": "usage refresh is only available for Claude terminals"},
+                status=400,
+            )
+        if not session.alive:
+            return web.json_response({"error": "session is not alive"}, status=409)
+        await session.inject_control_input("/usage\r")
+        return web.json_response({"ok": True, "session_id": session.session_id})
+
     async def handle_api_profiles(self, request: web.Request) -> web.Response:
         """GET /api/profiles — return permission profile definitions. Localhost-only."""
         if not self._localhost(request):
@@ -2638,6 +2655,10 @@ class AgentRelay:
         app.router.add_get(
             "/api/terminal/sessions/{session_id}/usage",
             self.handle_api_terminal_session_usage,
+        )
+        app.router.add_post(
+            "/api/terminal/sessions/{session_id}/usage/refresh",
+            self.handle_api_terminal_session_usage_refresh,
         )
         app.router.add_get("/api/profiles", self.handle_api_profiles)
         app.router.add_get("/api/skills", self.handle_api_skills)

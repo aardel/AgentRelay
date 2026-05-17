@@ -118,6 +118,11 @@ class PTYSession:
         if self._pty and not self._closed:
             await self._pty.write(data)
 
+    async def inject_control_input(self, data: str) -> None:
+        """Send AgentRelay-owned control input to the PTY."""
+        if self._pty and not self._closed:
+            await self._pty.write(data)
+
     async def resize(self, cols: int, rows: int, token: str) -> None:
         """Resize the PTY and broadcast resize_sync. Raises PermissionError if invalid."""
         if token != self._write_token:
