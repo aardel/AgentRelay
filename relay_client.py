@@ -862,10 +862,10 @@ def forward_to_peer(
     try:
         status, data = _run(_post())
         if status == 200 and data.get("ok"):
-            accepted = data.get("bytes_accepted")
+            accepted = data.get("forwarded_byte_count")
             if accepted is not None and accepted < sent_bytes:
                 return False, (
-                    f"Truncated: sent {sent_bytes} bytes but remote accepted "
+                    f"Truncated: sent {sent_bytes} bytes but remote forwarded "
                     f"{accepted} bytes."
                 )
             detail = (data.get("stdout") or data.get("status") or "Forwarded").strip()

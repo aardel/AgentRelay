@@ -1211,6 +1211,7 @@ class AgentRelay:
         ok = result.get("exit_code", 1) == 0 or result.get("status") in (
             "sent", "queued", "spawned")
         full_message = (header if adapter.mode in INTERACTIVE_MODES else "") + message
+        forwarded_byte_count = len(full_message.encode("utf-8"))
         return web.json_response({
             "ok": ok,
             "node": self.cfg.node_name,
@@ -1219,7 +1220,8 @@ class AgentRelay:
             "delivery": "forward",
             "requested_agent": requested_agent,
             "resolved_agent": to_agent,
-            "bytes_accepted": len(full_message.encode("utf-8")),
+            "byte_count": len(message.encode("utf-8")),
+            "forwarded_byte_count": forwarded_byte_count,
             **result,
         })
 
