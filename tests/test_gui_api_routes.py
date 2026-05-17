@@ -46,8 +46,17 @@ class GuiApiRoutesTests(unittest.IsolatedAsyncioTestCase):
         pty_registry._sessions.clear()
         self.tmp.cleanup()
 
-    async def test_gui_index_served(self) -> None:
-        resp = await self.client.get("/")
+    async def test_gui_index_redirects_localhost_without_token(self) -> None:
+        resp = await self.client.get("/", allow_redirects=False)
+        self.assertEqual(resp.status, 302)
+        location = resp.headers.get("Location", "")
+        self.assertIn("token=test-token", location)
+        self.assertIn("port=9876", location)
+
+    async def test_gui_index_served_with_token(self) -> None:
+        resp = await self.client.get(
+            "/?token=test-token-12345678901234567890&port=9876"
+        )
         self.assertEqual(resp.status, 200)
         text = await resp.text()
         self.assertIn("AgentRelay", text)

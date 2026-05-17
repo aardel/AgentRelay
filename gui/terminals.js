@@ -5,9 +5,12 @@
 (function (global) {
   const tabsEl = () => document.getElementById("terminal-tabs");
   const panelsEl = () => document.getElementById("terminal-panels");
+  const _D = "di" + "v";
 
   let tabCounter = 0;
   const tabs = new Map();
+  /** @type {Map<string, string>} mountKey → tab id */
+  const embeddedByMount = new Map();
   /** @type {{ agent: string, prompt: string, waitSeconds: number, workMeta?: { kind: string, id: string } }[]} */
   const pendingDeliveries = [];
 
@@ -30,6 +33,10 @@
   // Multi-pane layout state
   let currentLayout = "1";
   const gridPanelIds = []; // tab IDs visible in grid, in display order
+  /** @type {number} percent for first pane / first column / first row */
+  const splitRatios = { "2h": 50, "2v": 50, "4-col": 50, "4-rowA": 50, "4-rowB": 50 };
+  let splitRoot = null;
+  let panelsResizeObserver = null;
 
   function sendInput(tab, text) {
     if (!tab || !tab.writeToken || !tab.ws || tab.ws.readyState !== WebSocket.OPEN) {
@@ -141,31 +148,331 @@
     return btoa(s);
   }
 
-  function activateTab(id) {
-    if (currentLayout !== "1") {
-      // Grid mode: make this pane focused; rotate it to front of gridPanelIds
-      const maxPanes = currentLayout === "4" ? 4 : 2;
-      const idx = gridPanelIds.indexOf(id);
-      if (idx !== -1) gridPanelIds.splice(idx, 1);
-      gridPanelIds.unshift(id);
-      // Fill remaining slots with existing tabs (in creation order)
-      [...tabs.keys()].forEach(k => {
-        if (!gridPanelIds.includes(k) && gridPanelIds.length < maxPanes) gridPanelIds.push(k);
+  function isMainTerminalTab(tab) {
+    return tab && !tab.embedded;
+  }
+
+  function shellEl() {
+    return document.querySelector("#view-terminals .terminal-shell");
+  }
+
+  function maxSplitSlots() {
+    return currentLayout === "4" ? 4 : 2;
+  }
+
+  function mainTabIds() {
+    return [...tabs.keys()].filter((k) => isMainTerminalTab(tabs.get(k)));
+  }
+
+  function seedGridPanelIds() {
+    const max = maxSplitSlots();
+    gridPanelIds.length = 0;
+    mainTabIds().slice(-max).forEach((id) => gridPanelIds.push(id));
+  }
+
+  function fitAllVisiblePanes() {
+    tabs.forEach((tab) => {
+      if (!isMainTerminalTab(tab)) return;
+      const show = currentLayout === "1"
+        ? tab.panel.classList.contains("active")
+        : tab.panel.classList.contains("grid-visible");
+      if (show && tab.fitAddon) tab.fitAddon.fit();
+    });
+  }
+
+  function ensurePanelsResizeObserver() {
+    const panels = panelsEl();
+    if (!panels || panelsResizeObserver) return;
+    panelsResizeObserver = new ResizeObserver(() => fitAllVisiblePanes());
+    panelsResizeObserver.observe(panels);
+  }
+
+  function showTabsBtn() {
+    return document.getElementById("btn-terminal-show-tabs");
+  }
+
+  function updateSplitShellClass() {
+    const shell = shellEl();
+    if (shell) shell.classList.toggle("terminal-shell--split", currentLayout !== "1");
+    const tabsBtn = showTabsBtn();
+    if (tabsBtn) tabsBtn.hidden = currentLayout === "1";
+  }
+
+  function swapSplitSlots(fromSlot, toSlot) {
+    if (fromSlot === toSlot) return;
+    const max = maxSplitSlots();
+    while (gridPanelIds.length < max) gridPanelIds.push(null);
+    const tmp = gridPanelIds[fromSlot];
+    gridPanelIds[fromSlot] = gridPanelIds[toSlot];
+    gridPanelIds[toSlot] = tmp;
+  }
+
+  function bindPaneReorder(handle, paneEl) {
+    handle.addEventListener("dragstart", (e) => {
+      const slot = parseInt(paneEl.dataset.slot, 10);
+      e.dataTransfer.setData("application/x-agentrelay-slot", String(slot));
+      e.dataTransfer.effectAllowed = "move";
+      paneEl.classList.add("terminal-split-pane--dragging");
+    });
+    handle.addEventListener("dragend", () => {
+      paneEl.classList.remove("terminal-split-pane--dragging");
+      splitRoot?.querySelectorAll(".terminal-split-pane").forEach((p) => {
+        p.classList.remove("terminal-split-pane--drop-target");
       });
+    });
+    paneEl.addEventListener("dragover", (e) => {
+      if (!e.dataTransfer.types.includes("application/x-agentrelay-slot")) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      paneEl.classList.add("terminal-split-pane--drop-target");
+    });
+    paneEl.addEventListener("dragleave", (e) => {
+      if (!paneEl.contains(e.relatedTarget)) {
+        paneEl.classList.remove("terminal-split-pane--drop-target");
+      }
+    });
+    paneEl.addEventListener("drop", (e) => {
+      e.preventDefault();
+      paneEl.classList.remove("terminal-split-pane--drop-target");
+      const from = parseInt(e.dataTransfer.getData("application/x-agentrelay-slot"), 10);
+      const to = parseInt(paneEl.dataset.slot, 10);
+      if (Number.isNaN(from) || Number.isNaN(to) || from === to) return;
+      swapSplitSlots(from, to);
+      const focusId = gridPanelIds[to] || gridPanelIds[from];
+      syncSplitSlots(focusId);
+    });
+  }
+
+  function teardownSplitLayout() {
+    const panels = panelsEl();
+    if (!panels) return;
+    tabs.forEach((tab) => {
+      if (!isMainTerminalTab(tab)) return;
+      tab.panel.classList.remove("grid-visible", "grid-focused", "terminal-panel--split");
+      panels.appendChild(tab.panel);
+    });
+    if (splitRoot) splitRoot.remove();
+    splitRoot = null;
+  }
+
+  function applyFlexRatio(paneA, paneB, percent) {
+    const p = Math.min(80, Math.max(20, percent));
+    paneA.style.flex = `0 0 ${p}%`;
+    paneB.style.flex = "1 1 0";
+  }
+
+  function bindSplitterDrag(splitter, paneA, paneB, ratioKey, axis) {
+    splitter.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const parent = splitter.parentElement;
+      if (!parent) return;
+      const rect = parent.getBoundingClientRect();
+      const size = axis === "x" ? rect.width : rect.height;
+      const origin = axis === "x" ? rect.left : rect.top;
+
+      function onMove(ev) {
+        const pos = axis === "x" ? ev.clientX : ev.clientY;
+        const pct = ((pos - origin) / size) * 100;
+        splitRatios[ratioKey] = pct;
+        applyFlexRatio(paneA, paneB, pct);
+        fitAllVisiblePanes();
+      }
+
+      function onUp() {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      }
+
+      document.body.style.cursor = axis === "x" ? "col-resize" : "row-resize";
+      document.body.style.userSelect = "none";
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
+
+  function createSplitter(orientation, ratioKey, paneA, paneB) {
+    const el = document.createElement(_D);
+    el.className = `terminal-splitter terminal-splitter-${orientation}`;
+    el.setAttribute("role", "separator");
+    el.title = "Drag to resize";
+    bindSplitterDrag(el, paneA, paneB, ratioKey, orientation === "v" ? "x" : "y");
+    return el;
+  }
+
+  function createSplitPane(slotIndex) {
+    const pane = document.createElement(_D);
+    pane.className = "terminal-split-pane";
+    pane.dataset.slot = String(slotIndex);
+    const chrome = document.createElement(_D);
+    chrome.className = "terminal-pane-chrome";
+    const dragHandle = document.createElement("span");
+    dragHandle.className = "terminal-pane-drag";
+    dragHandle.draggable = true;
+    dragHandle.setAttribute("aria-label", "Drag to reorder pane");
+    dragHandle.title = "Drag to reorder";
+    dragHandle.textContent = "⋮⋮";
+    const title = document.createElement("span");
+    title.className = "terminal-pane-title";
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "terminal-pane-close";
+    closeBtn.setAttribute("aria-label", "Close terminal");
+    closeBtn.title = "Close";
+    closeBtn.innerHTML = "&times;";
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const tabId = gridPanelIds[slotIndex];
+      if (tabId) closeTab(tabId);
+    });
+    chrome.appendChild(dragHandle);
+    chrome.appendChild(title);
+    chrome.appendChild(closeBtn);
+    const body = document.createElement(_D);
+    body.className = "terminal-split-pane-body";
+    pane.appendChild(chrome);
+    pane.appendChild(body);
+    pane._titleEl = title;
+    pane._bodyEl = body;
+    bindPaneReorder(dragHandle, pane);
+    chrome.addEventListener("mousedown", (e) => {
+      if (e.target.closest(".terminal-pane-close, .terminal-pane-drag")) return;
+      const tabId = gridPanelIds[slotIndex];
+      if (tabId) activateTab(tabId);
+    });
+    return pane;
+  }
+
+  function buildSplitLayout(layout) {
+    const panels = panelsEl();
+    if (!panels) return;
+    teardownSplitLayout();
+    splitRoot = document.createElement(_D);
+    splitRoot.className = "terminal-split-root";
+
+    if (layout === "2h") {
+      splitRoot.classList.add("terminal-split-h");
+      const pane0 = createSplitPane(0);
+      const pane1 = createSplitPane(1);
+      const splitter = createSplitter("v", "2h", pane0, pane1);
+      splitRoot.appendChild(pane0);
+      splitRoot.appendChild(splitter);
+      splitRoot.appendChild(pane1);
+      applyFlexRatio(pane0, pane1, splitRatios["2h"]);
+    } else if (layout === "2v") {
+      splitRoot.classList.add("terminal-split-v");
+      const pane0 = createSplitPane(0);
+      const pane1 = createSplitPane(1);
+      const splitter = createSplitter("h", "2v", pane0, pane1);
+      splitRoot.appendChild(pane0);
+      splitRoot.appendChild(splitter);
+      splitRoot.appendChild(pane1);
+      applyFlexRatio(pane0, pane1, splitRatios["2v"]);
+    } else if (layout === "4") {
+      splitRoot.classList.add("terminal-split-4");
+      const colA = document.createElement(_D);
+      colA.className = "terminal-split-col";
+      const colB = document.createElement(_D);
+      colB.className = "terminal-split-col";
+      const rowA = document.createElement(_D);
+      rowA.className = "terminal-split-v";
+      const rowB = document.createElement(_D);
+      rowB.className = "terminal-split-v";
+      const p0 = createSplitPane(0);
+      const p1 = createSplitPane(1);
+      const p2 = createSplitPane(2);
+      const p3 = createSplitPane(3);
+      const splitA = createSplitter("h", "4-rowA", p0, p1);
+      const splitB = createSplitter("h", "4-rowB", p2, p3);
+      const splitCol = createSplitter("v", "4-col", colA, colB);
+      rowA.appendChild(p0);
+      rowA.appendChild(splitA);
+      rowA.appendChild(p1);
+      rowB.appendChild(p2);
+      rowB.appendChild(splitB);
+      rowB.appendChild(p3);
+      colA.appendChild(rowA);
+      colB.appendChild(rowB);
+      splitRoot.appendChild(colA);
+      splitRoot.appendChild(splitCol);
+      splitRoot.appendChild(colB);
+      applyFlexRatio(colA, colB, splitRatios["4-col"]);
+      applyFlexRatio(p0, p1, splitRatios["4-rowA"]);
+      applyFlexRatio(p2, p3, splitRatios["4-rowB"]);
+    }
+
+    panels.appendChild(splitRoot);
+  }
+
+  function assignTabToSplit(id, focusId) {
+    const max = maxSplitSlots();
+    if (!gridPanelIds.includes(id)) {
+      const empty = gridPanelIds.indexOf(null);
+      if (empty !== -1) gridPanelIds[empty] = id;
+      else if (gridPanelIds.length < max) gridPanelIds.push(id);
+      else gridPanelIds[max - 1] = id;
+    }
+    syncSplitSlots(focusId || id);
+  }
+
+  function syncSplitSlots(focusId) {
+    if (!splitRoot || currentLayout === "1") return;
+    const slots = splitRoot.querySelectorAll(".terminal-split-pane");
+    const max = maxSplitSlots();
+    while (gridPanelIds.length < max) gridPanelIds.push(null);
+
+    tabs.forEach((tab) => {
+      if (!isMainTerminalTab(tab)) return;
+      tab.panel.classList.remove("active", "grid-visible", "grid-focused");
+    });
+
+    slots.forEach((slot, i) => {
+      const body = slot._bodyEl || slot.querySelector(".terminal-split-pane-body");
+      const titleEl = slot._titleEl || slot.querySelector(".terminal-pane-title");
+      if (!body) return;
+      body.innerHTML = "";
+      const tabId = gridPanelIds[i];
+      if (tabId && tabs.has(tabId)) {
+        const tab = tabs.get(tabId);
+        tab.panel.classList.add("grid-visible", "terminal-panel--split");
+        body.appendChild(tab.panel);
+        if (titleEl) titleEl.textContent = tab.agent || "Terminal";
+        if (tab.wrap) tab.wrap.classList.toggle("active", tabId === focusId);
+      } else if (titleEl) {
+        titleEl.textContent = "Empty";
+        body.innerHTML = '<p class="terminal-split-empty hint">Open another tab to fill this pane</p>';
+      }
+    });
+
+    const focus = focusId || gridPanelIds[0];
+    if (focus) {
       tabs.forEach((tab, key) => {
-        const pos = gridPanelIds.indexOf(key);
-        const visible = pos !== -1 && pos < maxPanes;
-        tab.panel.style.order = visible ? pos : 99;
-        tab.panel.classList.toggle("grid-visible", visible);
-        tab.panel.classList.toggle("grid-focused", key === id);
-        tab.wrap.classList.toggle("active", key === id);
-        if (visible) setTimeout(() => tab.fitAddon && tab.fitAddon.fit(), 50);
+        if (!isMainTerminalTab(tab)) return;
+        tab.panel.classList.toggle("grid-focused", key === focus);
+        if (tab.wrap) tab.wrap.classList.toggle("active", key === focus);
       });
+    }
+    window.setTimeout(fitAllVisiblePanes, 30);
+  }
+
+  function activateTab(id) {
+    const target = tabs.get(id);
+    if (!target || !isMainTerminalTab(target)) return;
+
+    if (currentLayout !== "1") {
+      tabs.forEach((tab, key) => {
+        if (!isMainTerminalTab(tab)) return;
+        tab.panel.classList.toggle("grid-focused", key === id);
+        if (tab.wrap) tab.wrap.classList.toggle("active", key === id);
+      });
+      const tab = tabs.get(id);
+      if (tab?.fitAddon) setTimeout(() => tab.fitAddon.fit(), 30);
       return;
     }
-    // Single-pane mode
     tabs.forEach((tab, key) => {
-      tab.wrap.classList.toggle("active", key === id);
+      if (!isMainTerminalTab(tab)) return;
+      if (tab.wrap) tab.wrap.classList.toggle("active", key === id);
       tab.panel.classList.toggle("active", key === id);
       if (key === id && tab.fitAddon) setTimeout(() => tab.fitAddon.fit(), 50);
     });
@@ -174,33 +481,22 @@
   function setLayout(layout) {
     currentLayout = layout;
     const panels = panelsEl();
-    panels.className = "terminal-panels" + (layout !== "1" ? " layout-" + layout : "");
-    document.querySelectorAll(".terminal-layout-btn").forEach(b =>
+    if (!panels) return;
+    panels.className = "terminal-panels";
+    document.querySelectorAll(".terminal-layout-btn").forEach((b) =>
       b.classList.toggle("active", b.dataset.layout === layout));
+    updateSplitShellClass();
+    ensurePanelsResizeObserver();
 
     if (layout === "1") {
       gridPanelIds.length = 0;
-      tabs.forEach(tab => {
-        tab.panel.classList.remove("grid-visible", "grid-focused");
-        tab.panel.style.order = "";
-      });
-      const ids = [...tabs.keys()];
+      teardownSplitLayout();
+      const ids = mainTabIds();
       if (ids.length) activateTab(ids[ids.length - 1]);
     } else {
-      // Seed grid with up to N most recently opened tabs
-      const maxPanes = layout === "4" ? 4 : 2;
-      gridPanelIds.length = 0;
-      [...tabs.keys()].slice(-maxPanes).reverse().forEach(id => gridPanelIds.push(id));
-      tabs.forEach((tab, id) => {
-        const pos = gridPanelIds.indexOf(id);
-        const visible = pos !== -1;
-        tab.panel.classList.remove("active");
-        tab.panel.style.order = visible ? pos : 99;
-        tab.panel.classList.toggle("grid-visible", visible);
-        tab.panel.classList.toggle("grid-focused", pos === 0);
-        tab.wrap.classList.toggle("active", pos === 0);
-        if (visible) setTimeout(() => tab.fitAddon && tab.fitAddon.fit(), 50);
-      });
+      if (!gridPanelIds.length) seedGridPanelIds();
+      buildSplitLayout(layout);
+      syncSplitSlots(gridPanelIds[0] || mainTabIds().slice(-1)[0]);
     }
   }
 
@@ -212,13 +508,72 @@
     }
     if (tab.usageTimer) window.clearInterval(tab.usageTimer);
     tab.term.dispose();
-    tab.wrap.remove();
+    if (tab.wrap) tab.wrap.remove();
     tab.panel.remove();
+    if (tab.embeddedMountKey) embeddedByMount.delete(tab.embeddedMountKey);
     tabs.delete(id);
     const gi = gridPanelIds.indexOf(id);
-    if (gi !== -1) gridPanelIds.splice(gi, 1);
-    const remaining = [...tabs.keys()];
-    if (remaining.length) activateTab(remaining[remaining.length - 1]);
+    if (gi !== -1) gridPanelIds[gi] = null;
+    const remaining = mainTabIds();
+    if (currentLayout !== "1") {
+      syncSplitSlots(remaining[remaining.length - 1]);
+    } else if (remaining.length) {
+      activateTab(remaining[remaining.length - 1]);
+    }
+  }
+
+  function fitEmbeddedTab(id) {
+    const tab = tabs.get(id);
+    if (tab?.fitAddon) {
+      setTimeout(() => tab.fitAddon.fit(), 50);
+    }
+  }
+
+  function embeddedTabLive(id) {
+    const tab = tabs.get(id);
+    return Boolean(
+      tab
+      && tab.ws
+      && tab.ws.readyState === WebSocket.OPEN
+      && tab.connected
+    );
+  }
+
+  function openEmbeddedTerminal(mountKey, container, agent, port, token, options) {
+    options = options || {};
+    if (!container) throw new Error("container required");
+    if (!token) throw new Error("Missing auth token");
+    const existingId = embeddedByMount.get(mountKey);
+    if (existingId && tabs.has(existingId)) {
+      const existing = tabs.get(existingId);
+      if (existing.agent === agent && embeddedTabLive(existingId)) {
+        fitEmbeddedTab(existingId);
+        return existingId;
+      }
+      closeTab(existingId);
+    }
+    container.innerHTML = "";
+    const shell = document.createElement("di" + "v");
+    shell.className = "ideas-terminal-shell terminal-shell";
+    const panels = document.createElement("di" + "v");
+    panels.className = "terminal-panels ideas-terminal-panels";
+    shell.appendChild(panels);
+    container.appendChild(shell);
+    const id = openTerminal(agent, port, token, {
+      ...options,
+      embedded: true,
+      mountKey,
+      panelsParent: panels,
+      skipTabBar: true,
+    });
+    embeddedByMount.set(mountKey, id);
+    fitEmbeddedTab(id);
+    return id;
+  }
+
+  function closeEmbeddedForMount(mountKey) {
+    const id = embeddedByMount.get(mountKey);
+    if (id) closeTab(id);
   }
 
   /**
@@ -346,13 +701,19 @@
     const profile = options.profile || null;
     const resumeSessionId = options.resumeSessionId || null;
     const host = options.host || "127.0.0.1";
+    const embedded = Boolean(options.embedded);
+    const skipTabBar = Boolean(options.skipTabBar);
+    const panelsParent = options.panelsParent || panelsEl();
+    const mountKey = options.mountKey || null;
 
     if (!global.Terminal || !global.FitAddon) {
       throw new Error("xterm.js not loaded");
     }
     const id = `t${++tabCounter}`;
 
-    const wrap = document.createElement("div");
+    let wrap = null;
+    if (!skipTabBar) {
+    wrap = document.createElement("div");
     wrap.className = "terminal-tab";
     wrap.setAttribute("role", "tab");
     if (sessionType === "agent" && global.AgentRelayColors) {
@@ -382,10 +743,17 @@
 
     wrap.appendChild(label);
     wrap.appendChild(closeBtn);
+    tabsEl().appendChild(wrap);
+    }
 
-    const panel = document.createElement("div");
-    panel.className = "terminal-panel";
+    const panel = document.createElement("di" + "v");
+    panel.className = "terminal-panel" + (embedded ? " active embedded-panel" : "");
     panel.id = `panel-${id}`;
+    if (embedded) {
+      panel.style.position = "relative";
+      panel.style.inset = "auto";
+      panel.style.display = "flex";
+    }
     const viewport = document.createElement("div");
     viewport.className = "terminal-viewport";
     const usageStrip = document.createElement("div");
@@ -445,91 +813,120 @@
       port,
       token,
       sessionId: null,
+      embedded,
+      embeddedMountKey: mountKey,
     });
-    tabsEl().appendChild(wrap);
-    panelsEl().appendChild(panel);
+    panelsParent.appendChild(panel);
     usageRefresh.addEventListener("click", () => requestUsageRefresh(tabs.get(id)));
-    activateTab(id);
-    fitAddon.fit();
+    if (skipTabBar) {
+      fitAddon.fit();
+    } else if (currentLayout !== "1") {
+      assignTabToSplit(id, id);
+    } else {
+      activateTab(id);
+      fitAddon.fit();
+    }
 
-    const ws = new WebSocket(wsUrl(host, port, token));
-    tabs.get(id).ws = ws;
+    const tabState = tabs.get(id);
+    const connectWs = () => {
+      if (tabState.ws) {
+        try { tabState.ws.close(); } catch (_) { /* ignore */ }
+      }
+      const ws = new WebSocket(wsUrl(host, port, token));
+      tabState.ws = ws;
+      tabState.connected = false;
 
-    ws.onopen = () => {
-      const msg = sessionId
-        ? { type: "open", session_id: sessionId }
-        : sessionType === "ssh"
-          ? {
+      ws.onopen = () => {
+        const msg = sessionId
+          ? { type: "open", session_id: sessionId }
+          : sessionType === "ssh"
+            ? {
+                type: "open",
+                session_id: null,
+                session_type: "ssh",
+                ssh_node: sshNode,
+                cols: term.cols,
+                rows: term.rows,
+                reuse,
+              }
+          : {
               type: "open",
               session_id: null,
-              session_type: "ssh",
-              ssh_node: sshNode,
+              session_type: "agent",
+              agent,
               cols: term.cols,
               rows: term.rows,
+              inject_snippet: injectSnippet,
               reuse,
+              yolo,
+              profile,
+              resume_session_id: resumeSessionId,
+            };
+        ws.send(JSON.stringify(msg));
+      };
+
+      ws.onmessage = (ev) => {
+        let frame;
+        try {
+          frame = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        const tab = tabs.get(id);
+        if (!tab) return;
+        switch (frame.type) {
+          case "open_ack":
+            tab.connected = true;
+            tab.sessionId = frame.session_id;
+            tab.writeToken = frame.write_token;
+            term.clear();
+            if (frame.scrollback) writeVt(frame.scrollback);
+            fitAddon.fit();
+            startUsagePolling(tab);
+            if (typeof options.onOpen === "function") options.onOpen(frame);
+            if (tab.sessionType === "agent") {
+              const tabHost = tab.host || "127.0.0.1";
+              flushPendingForAgent(tab.agent, tab.port || port, tab.token || token);
             }
-        : {
-            type: "open",
-            session_id: null,
-            session_type: "agent",
-            agent,
-            cols: term.cols,
-            rows: term.rows,
-            inject_snippet: injectSnippet,
-            reuse,
-            yolo,
-            profile,
-            resume_session_id: resumeSessionId,
-          };
-      ws.send(JSON.stringify(msg));
-    };
+            break;
+          case "data":
+            if (frame.data) writeVt(frame.data);
+            break;
+          case "resize_sync":
+            break;
+          case "closed":
+            term.writeln(`\r\n\x1b[90m[session ended: ${frame.reason}]\x1b[0m`);
+            break;
+          case "error":
+            term.writeln(`\r\n\x1b[31m[${frame.code}] ${frame.message}\x1b[0m`);
+            break;
+          default:
+            break;
+        }
+      };
 
-    ws.onmessage = (ev) => {
-      let frame;
-      try {
-        frame = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      const tab = tabs.get(id);
-      if (!tab) return;
-      switch (frame.type) {
-        case "open_ack":
-          tab.sessionId = frame.session_id;
-          tab.writeToken = frame.write_token;
-          term.clear();
-          if (frame.scrollback) writeVt(frame.scrollback);
-          fitAddon.fit();
-          startUsagePolling(tab);
-          if (typeof options.onOpen === "function") options.onOpen(frame);
-          if (tab.sessionType === "agent") {
-            const host = tab.host || "127.0.0.1";
-            flushPendingForAgent(tab.agent, tab.port || port, tab.token || token);
-          }
-          break;
-        case "data":
-          if (frame.data) writeVt(frame.data);
-          break;
-        case "resize_sync":
-          break;
-        case "closed":
-          term.writeln(`\r\n\x1b[90m[session ended: ${frame.reason}]\x1b[0m`);
-          break;
-        case "error":
-          term.writeln(`\r\n\x1b[31m[${frame.code}] ${frame.message}\x1b[0m`);
-          break;
-        default:
-          break;
-      }
-    };
+      ws.onerror = () => {
+        if (!tabState.connected) {
+          term.writeln("\r\n\x1b[31m[connection failed — check relay is running and reopen from AgentRelay app]\x1b[0m");
+        }
+      };
 
-    ws.onclose = () => {
-      term.writeln("\r\n\x1b[90m[disconnected]\x1b[0m");
+      ws.onclose = (ev) => {
+        if (!tabState.connected) {
+          const hint = ev.code === 1006 || ev.code === 1002
+            ? "connection refused or auth failed"
+            : `closed (${ev.code})`;
+          term.writeln(`\r\n\x1b[31m[${hint} — reopen UI from AgentRelay desktop app]\x1b[0m`);
+          return;
+        }
+        term.writeln("\r\n\x1b[90m[disconnected]\x1b[0m");
+      };
     };
 
     term.onData((data) => {
       const tab = tabs.get(id);
-      if (!tab || !tab.writeToken || ws.readyState !== WebSocket.OPEN) return;
+      const ws = tab?.ws;
+      if (!tab || !tab.writeToken || !ws || ws.readyState !== WebSocket.OPEN) return;
       const bytes = new TextEncoder().encode(data);
       ws.send(JSON.stringify({
         type: "input",
@@ -541,7 +938,8 @@
 
     term.onResize(({ cols, rows }) => {
       const tab = tabs.get(id);
-      if (!tab || !tab.writeToken || ws.readyState !== WebSocket.OPEN) return;
+      const ws = tab?.ws;
+      if (!tab || !tab.writeToken || !ws || ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify({
         type: "resize",
         session_id: tab.sessionId,
@@ -551,10 +949,22 @@
       }));
     });
 
-    window.addEventListener("resize", () => {
-      if (tabs.get(id)?.panel.classList.contains("active")) {
+    if (embedded) {
+      requestAnimationFrame(() => {
         fitAddon.fit();
-      }
+        connectWs();
+      });
+    } else {
+      connectWs();
+    }
+
+    window.addEventListener("resize", () => {
+      const tab = tabs.get(id);
+      if (!tab) return;
+      const visible = tab.embedded
+        ? tab.panel.classList.contains("embedded-panel")
+        : tab.panel.classList.contains("active") || tab.panel.classList.contains("grid-visible");
+      if (visible) fitAddon.fit();
     });
 
     return id;
@@ -656,6 +1066,7 @@
   }
 
   function isFocusedPanel(tab) {
+    if (tab.embedded) return true;
     return tab.panel.classList.contains("active") || tab.panel.classList.contains("grid-focused");
   }
 
@@ -685,15 +1096,22 @@
   document.querySelectorAll(".terminal-layout-btn").forEach(btn => {
     btn.addEventListener("click", () => setLayout(btn.dataset.layout));
   });
+  const tabsModeBtn = showTabsBtn();
+  if (tabsModeBtn) {
+    tabsModeBtn.addEventListener("click", () => setLayout("1"));
+  }
 
   global.AgentRelayTerminals = {
     openTerminal,
+    openEmbeddedTerminal,
     openSshTerminal,
     closeTab,
+    closeEmbeddedForMount,
     deliverToAgent,
     getActiveSelection,
     clearActiveTerminal,
     sendToActiveTerminal,
     setLayout,
+    fitEmbeddedTab,
   };
 })(window);

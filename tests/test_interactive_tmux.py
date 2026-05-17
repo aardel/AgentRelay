@@ -52,12 +52,13 @@ class InteractiveTmuxTests(unittest.TestCase):
         )
 
         async def run_test():
-            with patch.object(agentrelay.shutil, "which", return_value="/usr/bin/tmux"):
-                with patch.object(agentrelay, "run_subprocess", new=AsyncMock(
-                    return_value={"status": "ok", "exit_code": 0, "stdout": "", "stderr": ""}
-                )) as run_subprocess:
-                    with patch.object(asyncio, "sleep", new=AsyncMock()):
-                        result = await agentrelay.spawn_agent(cfg, adapter, "hello world")
+            with patch.object(agentrelay.platform, "system", return_value="Linux"):
+                with patch.object(agentrelay.shutil, "which", return_value="/usr/bin/tmux"):
+                    with patch.object(agentrelay, "run_subprocess", new=AsyncMock(
+                        return_value={"status": "ok", "exit_code": 0, "stdout": "", "stderr": ""}
+                    )) as run_subprocess:
+                        with patch.object(asyncio, "sleep", new=AsyncMock()):
+                            result = await agentrelay.spawn_agent(cfg, adapter, "hello world")
 
             self.assertEqual(run_subprocess.await_count, 3)
             run_subprocess.assert_any_await(

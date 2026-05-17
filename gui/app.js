@@ -1,11 +1,37 @@
 /** AgentRelay local web UI — talks to the embedded daemon on localhost. */
 
 const params = new URLSearchParams(window.location.search);
-const AUTH_TOKEN = params.get("token") || sessionStorage.getItem("agentrelay_token") || "";
-const API_PORT = parseInt(params.get("port") || "9876", 10);
+const urlToken = params.get("token") || "";
+let AUTH_TOKEN = urlToken || sessionStorage.getItem("agentrelay_token") || "";
+let API_PORT = parseInt(params.get("port") || sessionStorage.getItem("agentrelay_port") || "9876", 10);
 
-if (AUTH_TOKEN) {
-  sessionStorage.setItem("agentrelay_token", AUTH_TOKEN);
+if (urlToken) {
+  AUTH_TOKEN = urlToken;
+  sessionStorage.setItem("agentrelay_token", urlToken);
+}
+if (params.get("port")) {
+  sessionStorage.setItem("agentrelay_port", String(API_PORT));
+}
+
+function syncRelayConfig() {
+  window.AgentRelayConfig = { token: AUTH_TOKEN, port: API_PORT };
+}
+
+syncRelayConfig();
+
+function clearStoredAuth() {
+  sessionStorage.removeItem("agentrelay_token");
+  sessionStorage.removeItem("agentrelay_port");
+  AUTH_TOKEN = "";
+  syncRelayConfig();
+}
+
+function authFailureMessage(status) {
+  if (status === 401) {
+    clearStoredAuth();
+    return "Invalid or expired token — close this tab and open AgentRelay from the desktop app";
+  }
+  return "Cannot reach relay — is the daemon running?";
 }
 
 const el = (id) => document.getElementById(id);
@@ -124,6 +150,8 @@ function showView(name) {
   const nav = document.querySelector(`.nav-item[data-view="${name}"]`);
   if (view) view.classList.add("active");
   if (nav) nav.classList.add("active");
+  if (name === "ideas" && window.ideasLoad) window.ideasLoad();
+  if (name === "bugs" && window.bugsLoad) window.bugsLoad();
 }
 window.showView = showView;
 
@@ -407,12 +435,17 @@ async function refresh() {
     setFooter("Missing token — restart the app from agentrelay-gui");
     return;
   }
-  const { ok, data } = await api("/api/status");
+  const { ok, data, status } = await api("/api/status");
   if (!ok) {
     setRelay(false);
-    setFooter("Cannot reach relay — is the daemon running?");
+    setFooter(authFailureMessage(status));
     return;
   }
+  if (data.port) {
+    API_PORT = data.port;
+    sessionStorage.setItem("agentrelay_port", String(API_PORT));
+  }
+  syncRelayConfig();
   setRelay(data.relay_running !== false);
   el("node-name").value = data.node || "";
   el("this-address").textContent = data.address
@@ -1488,4 +1521,139 @@ el("btn-get-latest")?.addEventListener("click", async () => {
   }
   status.textContent = data.message || (data.already_current ? "Already up to date." : "Updated.");
   setFooter(data.message || "");
+});
+
+// ── Screenshot modal ──────────────────────────────────────────────────────────
+
+let _screenshotCanvas = null;
+let _screenshotStream = null;
+
+function openScreenshotModal() {
+  el("screenshot-modal").hidden = false;
+  el("screenshot-description").focus();
+}
+
+function closeScreenshotModal() {
+  el("screenshot-modal").hidden = true;
+  if (_screenshotStream) {
+    _screenshotStream.getTracks().forEach((t) => t.stop());
+    _screenshotStream = null;
+  }
+  _screenshotCanvas = null;
+  el("screenshot-preview").innerHTML = '<span class="screenshot-preview-hint">Capture your screen or paste an image (Ctrl+V)</span>';
+  el("screenshot-description").value = "";
+  el("btn-screenshot-send").disabled = true;
+}
+
+function _setScreenshotCanvas(canvas) {
+  _screenshotCanvas = canvas;
+  const preview = el("screenshot-preview");
+  preview.innerHTML = "";
+  const img = document.createElement("img");
+  img.src = canvas.toDataURL("image/png");
+  img.className = "screenshot-preview-img";
+  preview.appendChild(img);
+  el("btn-screenshot-send").disabled = false;
+}
+
+async function _blobToCanvas(blob) {
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext("2d").drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return canvas;
+}
+
+el("btn-screenshot")?.addEventListener("click", openScreenshotModal);
+el("screenshot-modal-close")?.addEventListener("click", closeScreenshotModal);
+el("btn-screenshot-cancel")?.addEventListener("click", closeScreenshotModal);
+el("screenshot-modal")?.addEventListener("click", (e) => {
+  if (e.target === el("screenshot-modal")) closeScreenshotModal();
+});
+
+el("btn-screenshot-capture")?.addEventListener("click", async () => {
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    _screenshotStream = stream;
+    const video = document.createElement("video");
+    video.srcObject = stream;
+    await new Promise((resolve) => { video.onloadedmetadata = resolve; });
+    await video.play();
+    await new Promise((resolve) => {
+      if (typeof video.requestVideoFrameCallback === "function") {
+        video.requestVideoFrameCallback(resolve);
+      } else {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      }
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d").drawImage(video, 0, 0);
+    stream.getTracks().forEach((t) => t.stop());
+    _screenshotStream = null;
+    _setScreenshotCanvas(canvas);
+  } catch (e) {
+    if (e.name !== "AbortError" && e.name !== "NotAllowedError") {
+      setFooter("Screen capture failed: " + e.message);
+    }
+  }
+});
+
+el("btn-screenshot-paste")?.addEventListener("click", async () => {
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      const imageType = item.types.find((t) => t.startsWith("image/"));
+      if (imageType) {
+        const blob = await item.getType(imageType);
+        _setScreenshotCanvas(await _blobToCanvas(blob));
+        return;
+      }
+    }
+    setFooter("No image found in clipboard");
+  } catch (e) {
+    setFooter("Clipboard read failed — try Ctrl+V with the modal focused");
+  }
+});
+
+el("screenshot-modal")?.addEventListener("paste", async (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith("image/")) {
+      e.preventDefault();
+      const blob = item.getAsFile();
+      _setScreenshotCanvas(await _blobToCanvas(blob));
+      return;
+    }
+  }
+});
+
+el("btn-screenshot-send")?.addEventListener("click", async () => {
+  if (!_screenshotCanvas) return;
+  const dataUrl = _screenshotCanvas.toDataURL("image/png");
+  const description = el("screenshot-description").value.trim();
+  try {
+    const { ok, data } = await api("/api/screenshot", {
+      method: "POST",
+      body: JSON.stringify({ data: dataUrl }),
+    });
+    if (!ok) {
+      setFooter("Screenshot upload failed");
+      return;
+    }
+    const filePath = data.path;
+    const message = description
+      ? `${description}\n\nScreenshot: ${filePath}`
+      : `Screenshot: ${filePath}`;
+    const sent = window.AgentRelayTerminals?.sendToActiveTerminal(message);
+    if (!sent) relayContent(message);
+    closeScreenshotModal();
+    setFooter("Screenshot sent to agent");
+  } catch (e) {
+    setFooter("Screenshot send failed: " + e.message);
+  }
 });

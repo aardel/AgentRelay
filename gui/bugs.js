@@ -11,25 +11,37 @@
     low: "severity-low",
   };
   const STATUS_LABEL = { draft: "Draft", queued: "Queued", in_progress: "In progress", done: "Done" };
-  const STATUS_CLASS = { draft: "status-draft", queued: "status-queued", in_progress: "status-inprogress", done: "status-done" };
+  const STATUS_CLASS = {
+    draft: "status-draft",
+    queued: "status-queued",
+    in_progress: "status-inprogress",
+    done: "status-done",
+  };
 
   let _bugs = [];
-  let _filter = "all";      // "all" | "draft" | "queued" | "done"
+  let _filter = "all";
   let _selectedId = null;
   let _editing = false;
 
-  // ── DOM refs ──────────────────────────────────────────────────────────────
-
   function el(id) { return document.getElementById(id); }
 
-  const bugsList     = () => el("bugs-list");
-  const formPanel    = () => el("bugs-form-panel");
-  const filterBtns   = () => document.querySelectorAll(".bugs-filter-btn");
+  const bugsList = () => el("bugs-list");
+  const formPanel = () => el("bugs-form-panel");
+  const filterBtns = () => document.querySelectorAll(".bugs-filter-btn");
 
-  // ── API helpers ───────────────────────────────────────────────────────────
+  function authToken() {
+    return sessionStorage.getItem("agentrelay_token")
+      || new URLSearchParams(window.location.search).get("token")
+      || "";
+  }
 
   function authHeader() {
-    return { "X-Agent-Token": window.AGENT_TOKEN || "" };
+    return { "X-Agent-Token": authToken() };
+  }
+
+  function setBugsFooter(msg) {
+    const footer = el("footer");
+    if (footer) footer.textContent = msg;
   }
 
   async function apiFetch(method, path, body) {
@@ -39,19 +51,28 @@
     };
     if (body !== undefined) opts.body = JSON.stringify(body);
     const resp = await fetch(path, opts);
-    return resp;
+    let data = {};
+    try {
+      data = await resp.json();
+    } catch (_) { /* non-json */ }
+    return { resp, data, ok: resp.ok };
   }
-
-  // ── Load & render ─────────────────────────────────────────────────────────
 
   async function loadBugs() {
     try {
-      const resp = await apiFetch("GET", "/api/bugs");
-      if (!resp.ok) return;
-      const data = await resp.json();
+      const { ok, data } = await apiFetch("GET", "/api/bugs");
+      if (!ok) {
+        if (data.error === "unauthorized") {
+          setBugsFooter("Bugs: not authorized — reload the app from AgentRelay");
+        }
+        return;
+      }
       _bugs = data.bugs || [];
       renderList();
-    } catch (_) { /* offline */ }
+      if (_selectedId) renderForm();
+    } catch (_) {
+      setBugsFooter("Bugs: cannot reach AgentRelay daemon");
+    }
   }
 
   function visibleBugs() {
@@ -66,7 +87,7 @@
     if (!list) return;
     const items = visibleBugs();
     if (items.length === 0) {
-      list.innerHTML = '<li class="bugs-empty">No bugs logged yet. Add one!</li>';
+      list.innerHTML = '<li class="bugs-empty">No bugs logged yet. Click + Log bug to add one.</li>';
       return;
     }
     list.innerHTML = items.map(bug => `
@@ -87,11 +108,25 @@
     });
   }
 
+  function scrollToFormPanel() {
+    formPanel()?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
   function selectBug(id) {
     _selectedId = id;
     _editing = false;
     renderList();
     renderForm();
+    scrollToFormPanel();
+  }
+
+  function renderEmptyPanel() {
+    const panel = formPanel();
+    if (!panel) return;
+    panel.innerHTML = `
+      <p class="bugs-form-hint">Select a bug from the list, or click <strong>+ Log bug</strong>.</p>
+      <button type="button" class="btn primary small" id="bugs-add-inline-btn" style="margin-top:0.75rem">+ Log bug</button>
+    `;
   }
 
   function renderForm() {
@@ -100,22 +135,16 @@
     const bug = _bugs.find(b => b.id === _selectedId);
 
     if (!bug) {
-      panel.innerHTML = '<p class="bugs-form-hint">Select a bug or add a new one.</p>';
+      renderEmptyPanel();
       return;
     }
 
     if (_editing) {
       panel.innerHTML = `
         <div class="bugs-form">
-          <label>Title
-            <input id="bugs-edit-title" type="text" value="${escHtml(bug.title)}">
-          </label>
-          <label>Description
-            <textarea id="bugs-edit-desc" rows="3">${escHtml(bug.description || "")}</textarea>
-          </label>
-          <label>Steps to reproduce
-            <textarea id="bugs-edit-steps" rows="3">${escHtml(bug.steps_to_reproduce || "")}</textarea>
-          </label>
+          <label>Title <input id="bugs-edit-title" type="text" value="${escHtml(bug.title)}"></label>
+          <label>Description <textarea id="bugs-edit-desc" rows="3">${escHtml(bug.description || "")}</textarea></label>
+          <label>Steps to reproduce <textarea id="bugs-edit-steps" rows="3">${escHtml(bug.steps_to_reproduce || "")}</textarea></label>
           <label>Severity
             <select id="bugs-edit-severity">
               <option value="critical" ${bug.severity === "critical" ? "selected" : ""}>Critical</option>
@@ -132,22 +161,20 @@
               <option value="done" ${bug.status === "done" ? "selected" : ""}>Done</option>
             </select>
           </label>
-          <label>Notes
-            <textarea id="bugs-edit-notes" rows="3">${escHtml(bug.notes || "")}</textarea>
-          </label>
+          <label>Notes <textarea id="bugs-edit-notes" rows="3">${escHtml(bug.notes || "")}</textarea></label>
           <div class="row" style="gap:0.5rem;margin-top:0.5rem">
-            <button class="btn primary small" id="bugs-save-btn">Save</button>
-            <button class="btn ghost small" id="bugs-cancel-edit-btn">Cancel</button>
+            <button type="button" class="btn primary small" id="bugs-save-btn">Save</button>
+            <button type="button" class="btn ghost small" id="bugs-cancel-edit-btn">Cancel</button>
           </div>
         </div>
       `;
-      el("bugs-save-btn").addEventListener("click", () => saveEdit(bug.id));
-      el("bugs-cancel-edit-btn").addEventListener("click", () => { _editing = false; renderForm(); });
+      el("bugs-save-btn")?.addEventListener("click", () => saveEdit(bug.id));
+      el("bugs-cancel-edit-btn")?.addEventListener("click", () => { _editing = false; renderForm(); });
       return;
     }
 
     const canQueue = bug.status === "draft";
-    const canDone  = bug.status === "queued" || bug.status === "in_progress";
+    const canDone = bug.status === "queued" || bug.status === "in_progress";
     panel.innerHTML = `
       <div class="bugs-detail">
         <div class="bugs-detail-header">
@@ -160,20 +187,19 @@
         ${bug.notes ? `<div class="bugs-detail-notes"><strong>Notes:</strong> ${escHtml(bug.notes)}</div>` : ""}
         <p class="hint" style="margin-top:0.5rem">Logged ${fmtDate(bug.created_at)}</p>
         <div class="row" style="gap:0.5rem;margin-top:1rem;flex-wrap:wrap">
-          ${canQueue ? '<button class="btn primary small" id="bugs-queue-btn">Queue for auto-run</button>' : ""}
-          ${canDone  ? '<button class="btn ghost small" id="bugs-done-btn">Mark fixed</button>' : ""}
-          <button class="btn ghost small" id="bugs-edit-btn">Edit</button>
-          <button class="btn ghost small bugs-delete-btn" id="bugs-delete-btn">Delete</button>
+          ${canQueue ? '<button type="button" class="btn primary small" id="bugs-queue-btn">Queue for auto-run</button>' : ""}
+          ${canDone ? '<button type="button" class="btn ghost small" id="bugs-done-btn">Mark fixed</button>' : ""}
+          <button type="button" class="btn ghost small" id="bugs-edit-btn">Edit</button>
+          <button type="button" class="btn ghost small bugs-delete-btn" id="bugs-delete-btn">Delete</button>
         </div>
       </div>
     `;
-    if (canQueue) el("bugs-queue-btn").addEventListener("click", () => queueBug(bug.id));
-    if (canDone)  el("bugs-done-btn").addEventListener("click",  () => markDone(bug.id));
-    el("bugs-edit-btn").addEventListener("click", () => { _editing = true; renderForm(); });
-    el("bugs-delete-btn").addEventListener("click", () => deleteBug(bug.id));
-  }
 
-  // ── Add form ──────────────────────────────────────────────────────────────
+    if (canQueue) el("bugs-queue-btn")?.addEventListener("click", () => queueBug(bug.id));
+    if (canDone) el("bugs-done-btn")?.addEventListener("click", () => markDone(bug.id));
+    el("bugs-edit-btn")?.addEventListener("click", () => { _editing = true; renderForm(); });
+    el("bugs-delete-btn")?.addEventListener("click", () => deleteBug(bug.id));
+  }
 
   function renderAddForm() {
     const panel = formPanel();
@@ -185,13 +211,13 @@
       <div class="bugs-form">
         <h3 style="margin-bottom:0.75rem">New bug</h3>
         <label>Title
-          <input id="bugs-new-title" type="text" placeholder="What broke?">
+          <input id="bugs-new-title" type="text" placeholder="What broke?" autocomplete="off">
         </label>
         <label>Description <span class="hint" style="font-size:0.8rem">(optional)</span>
           <textarea id="bugs-new-desc" rows="3" placeholder="What happened?"></textarea>
         </label>
         <label>Steps to reproduce <span class="hint" style="font-size:0.8rem">(optional)</span>
-          <textarea id="bugs-new-steps" rows="2" placeholder="1. Open…\n2. Click…"></textarea>
+          <textarea id="bugs-new-steps" rows="2" placeholder="1. Open…&#10;2. Click…"></textarea>
         </label>
         <label>Severity
           <select id="bugs-new-severity">
@@ -202,44 +228,59 @@
           </select>
         </label>
         <div class="row" style="gap:0.5rem;margin-top:0.5rem">
-          <button class="btn primary small" id="bugs-add-submit">Add bug</button>
-          <button class="btn ghost small" id="bugs-add-cancel">Cancel</button>
+          <button type="button" class="btn primary small" id="bugs-add-submit">Add bug</button>
+          <button type="button" class="btn ghost small" id="bugs-add-cancel">Cancel</button>
         </div>
       </div>
     `;
-    el("bugs-new-title").focus();
-    el("bugs-add-submit").addEventListener("click", submitNewBug);
-    el("bugs-add-cancel").addEventListener("click", () => {
-      panel.innerHTML = '<p class="bugs-form-hint">Select a bug or add a new one.</p>';
-    });
-    el("bugs-new-title").addEventListener("keydown", e => {
-      if (e.key === "Enter") submitNewBug();
-    });
-  }
 
-  // ── CRUD actions ──────────────────────────────────────────────────────────
+    scrollToFormPanel();
+    el("bugs-new-title")?.focus();
+    el("bugs-add-submit")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      submitNewBug();
+    });
+    el("bugs-add-cancel")?.addEventListener("click", () => renderEmptyPanel());
+    el("bugs-new-title")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitNewBug();
+      }
+    });
+    setBugsFooter("Enter bug details, then click Add bug");
+  }
 
   async function submitNewBug() {
     const title = (el("bugs-new-title")?.value || "").trim();
-    if (!title) { el("bugs-new-title")?.focus(); return; }
+    if (!title) {
+      el("bugs-new-title")?.focus();
+      setBugsFooter("Title is required");
+      return;
+    }
     const body = {
       title,
       description: el("bugs-new-desc")?.value || "",
       steps_to_reproduce: el("bugs-new-steps")?.value || "",
       severity: el("bugs-new-severity")?.value || "medium",
     };
-    const resp = await apiFetch("POST", "/api/bugs", body);
-    if (!resp.ok) return;
-    const data = await resp.json();
+    setBugsFooter("Saving bug…");
+    const { ok, data, resp } = await apiFetch("POST", "/api/bugs", body);
+    if (!ok) {
+      setBugsFooter(data.error || `Could not save bug (${resp.status})`);
+      if (resp.status === 404) {
+        alert("Bugs API not found. Restart AgentRelay to load the latest version.");
+      }
+      return;
+    }
     _bugs.unshift(data.bug);
     _bugs.sort((a, b) => {
       const SR = { critical: 0, high: 1, medium: 2, low: 3 };
       return (SR[a.severity] ?? 2) - (SR[b.severity] ?? 2) || a.created_at - b.created_at;
     });
     _selectedId = data.bug.id;
-    _editing = false;
     renderList();
     renderForm();
+    setBugsFooter(`Bug logged: ${data.bug.title}`);
   }
 
   async function saveEdit(id) {
@@ -251,57 +292,59 @@
       status: el("bugs-edit-status")?.value || "draft",
       notes: el("bugs-edit-notes")?.value || "",
     };
-    if (!body.title) { el("bugs-edit-title")?.focus(); return; }
-    const resp = await apiFetch("PATCH", `/api/bugs/${id}`, body);
-    if (!resp.ok) return;
-    const data = await resp.json();
+    if (!body.title) {
+      el("bugs-edit-title")?.focus();
+      return;
+    }
+    const { ok, data } = await apiFetch("PATCH", `/api/bugs/${id}`, body);
+    if (!ok) {
+      setBugsFooter(data.error || "Could not save bug");
+      return;
+    }
     const idx = _bugs.findIndex(b => b.id === id);
     if (idx !== -1) _bugs[idx] = data.bug;
     _editing = false;
     renderList();
     renderForm();
+    setBugsFooter("Bug updated");
   }
 
   async function queueBug(id) {
-    const resp = await apiFetch("PATCH", `/api/bugs/${id}`, { status: "queued" });
-    if (!resp.ok) return;
-    const data = await resp.json();
+    const { ok, data } = await apiFetch("PATCH", `/api/bugs/${id}`, { status: "queued" });
+    if (!ok) return;
     const idx = _bugs.findIndex(b => b.id === id);
     if (idx !== -1) _bugs[idx] = data.bug;
     renderList();
     renderForm();
+    setBugsFooter("Bug queued for auto-run when agents are idle");
   }
 
   async function markDone(id) {
-    const resp = await apiFetch("PATCH", `/api/bugs/${id}`, { status: "done" });
-    if (!resp.ok) return;
-    const data = await resp.json();
+    const { ok, data } = await apiFetch("PATCH", `/api/bugs/${id}`, { status: "done" });
+    if (!ok) return;
     const idx = _bugs.findIndex(b => b.id === id);
     if (idx !== -1) _bugs[idx] = data.bug;
     renderList();
     renderForm();
+    setBugsFooter("Bug marked fixed");
   }
 
   async function deleteBug(id) {
     if (!confirm("Delete this bug?")) return;
-    const resp = await apiFetch("DELETE", `/api/bugs/${id}`);
-    if (!resp.ok) return;
+    const { ok } = await apiFetch("DELETE", `/api/bugs/${id}`);
+    if (!ok) return;
     _bugs = _bugs.filter(b => b.id !== id);
     _selectedId = null;
     renderList();
-    const panel = formPanel();
-    if (panel) panel.innerHTML = '<p class="bugs-form-hint">Select a bug or add a new one.</p>';
+    renderEmptyPanel();
+    setBugsFooter("Bug deleted");
   }
-
-  // ── Filters ───────────────────────────────────────────────────────────────
 
   function setFilter(f) {
     _filter = f;
     filterBtns().forEach(b => b.classList.toggle("active", b.dataset.filter === f));
     renderList();
   }
-
-  // ── Utility ───────────────────────────────────────────────────────────────
 
   function escHtml(s) {
     return String(s || "")
@@ -316,28 +359,22 @@
     return new Date(ts * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
 
-  // ── Init ──────────────────────────────────────────────────────────────────
+  function onDocumentClick(e) {
+    if (e.target.closest("#bugs-add-btn, #bugs-add-inline-btn")) {
+      e.preventDefault();
+      renderAddForm();
+    }
+  }
 
   function init() {
-    // Add bug button
-    const addBtn = el("bugs-add-btn");
-    if (addBtn) addBtn.addEventListener("click", renderAddForm);
+    document.addEventListener("click", onDocumentClick);
 
-    // Filter buttons
     filterBtns().forEach(btn => {
       btn.addEventListener("click", () => setFilter(btn.dataset.filter));
     });
 
-    // Load when view is shown
-    document.querySelectorAll(".nav-item").forEach(btn => {
-      btn.addEventListener("click", () => {
-        if (btn.dataset.view === "bugs") loadBugs();
-      });
-    });
-
-    // Reset form panel placeholder
-    const panel = formPanel();
-    if (panel) panel.innerHTML = '<p class="bugs-form-hint">Select a bug or add a new one.</p>';
+    renderEmptyPanel();
+    loadBugs();
   }
 
   if (document.readyState === "loading") {
@@ -346,6 +383,5 @@
     init();
   }
 
-  // Expose for external refresh (e.g., when view activates)
   window.bugsLoad = loadBugs;
 })();

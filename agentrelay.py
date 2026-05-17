@@ -385,6 +385,19 @@ class Config:
                     return candidate
         return None
 
+    def resolve_background_adapter_name(self, requested: str | None) -> str | None:
+        """Prefer a one-shot (non-interactive) adapter for API idea queries."""
+        resolved = self.resolve_adapter_name(requested, prefer_interactive=False)
+        if not resolved:
+            return None
+        spec = self.adapters.get(resolved)
+        if spec and spec.mode in INTERACTIVE_MODES:
+            base = agent_base_name(resolved)
+            bg = self.adapters.get(base)
+            if bg and bg.mode not in INTERACTIVE_MODES:
+                return base
+        return resolved
+
 
 # ============================================================
 # Policy engine
@@ -2095,6 +2108,14 @@ class AgentRelay:
         index = gui_directory() / "index.html"
         if not index.is_file():
             return web.Response(status=404, text="GUI not installed")
+        # Local browsers (Cursor preview, bookmarks) often omit ?token=; without it
+        # the GUI falls back to a stale sessionStorage token and /terminal returns 401.
+        if self._localhost(request) and not request.rel_url.query.get("token"):
+            from urllib.parse import urlencode
+
+            query = urlencode({"token": self.cfg.token, "port": self.cfg.port})
+            location = f"{request.rel_url.path or '/'}?{query}"
+            raise web.HTTPFound(location)
         return web.FileResponse(index)
 
     async def handle_api_status(self, request: web.Request) -> web.Response:
@@ -2783,7 +2804,7 @@ class AgentRelay:
         self, agent_name: str, prompt: str,
     ) -> tuple[str, dict[str, Any]]:
         """Run a one-shot agent query (background spawn) and return stdout."""
-        resolved = self.cfg.resolve_adapter_name(agent_name, prefer_interactive=False)
+        resolved = self.cfg.resolve_background_adapter_name(agent_name)
         if not resolved or resolved not in self.cfg.adapters:
             return "", {"status": "error", "exit_code": 1, "stderr": f"unknown agent: {agent_name}"}
         adapter = self.cfg.adapters[resolved]
@@ -2828,7 +2849,7 @@ class AgentRelay:
             prompt=message,
             source="agent",
         )
-        self.idea_store.update(idea_id, brainstorm_agent=agent, assigned_agent=agent)
+        self.idea_store.update(idea_id, brainstorm_agent=agent)
         return web.json_response({
             "ok": result.get("exit_code", 1) == 0,
             "idea": updated,
@@ -2848,11 +2869,12 @@ class AgentRelay:
         except Exception:
             return web.json_response({"error": "invalid json"}, status=400)
         content = str(body.get("content", "")).strip()
-        if not content:
-            return web.json_response({"error": "content required"}, status=400)
+        image_data = str(body.get("image_data", ""))
+        if not content and not image_data:
+            return web.json_response({"error": "content or image_data required"}, status=400)
         agent = str(body.get("agent") or "user").strip()
         updated = self.idea_store.add_finding(
-            idea_id, agent=agent, content=content, source="user",
+            idea_id, agent=agent, content=content, source="user", image_data=image_data,
         )
         return web.json_response({"idea": updated})
 
@@ -3085,6 +3107,31 @@ class AgentRelay:
             return web.json_response({"error": "session or work item not found"}, status=404)
         return web.json_response({"ok": True})
 
+    async def handle_api_screenshot(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        data_url = str(body.get("data", ""))
+        if not data_url:
+            return web.json_response({"error": "data required"}, status=400)
+        # Strip data URL prefix (data:image/png;base64,...)
+        if "," in data_url:
+            data_url = data_url.split(",", 1)[1]
+        try:
+            img_bytes = base64.b64decode(data_url)
+        except Exception:
+            return web.json_response({"error": "invalid image data"}, status=400)
+        screenshots_dir = self.config_path.parent / "screenshots"
+        screenshots_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"screenshot_{int(time.time())}_{uuid.uuid4().hex[:6]}.png"
+        filepath = screenshots_dir / filename
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, filepath.write_bytes, img_bytes)
+        return web.json_response({"path": str(filepath)})
+
     def build_app(self) -> web.Application:
         app = web.Application(client_max_size=16 * 1024 * 1024)  # 16 MB — large agent prompts can exceed 1 MB
         app.router.add_get("/health", self.handle_health)
@@ -3173,6 +3220,7 @@ class AgentRelay:
         app.router.add_delete("/api/bugs/{id}", self.handle_api_bug_delete)
         app.router.add_post("/api/work-queue/tick", self.handle_api_work_queue_tick)
         app.router.add_post("/api/work-queue/bind", self.handle_api_work_queue_bind)
+        app.router.add_post("/api/screenshot", self.handle_api_screenshot)
         return app
 
 

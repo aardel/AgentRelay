@@ -31,20 +31,44 @@
   let _selectedId = null;
   let _editing = false;
   let _busy = false;
+  let _capturedImageData = null;
 
   function el(id) { return document.getElementById(id); }
   const ideasList = () => el("ideas-list");
   const formPanel = () => el("ideas-form-panel");
   const filterBtns = () => document.querySelectorAll(".ideas-filter-btn");
 
+  function apiBase() {
+    const origin = window.location.origin;
+    if (origin.includes("127.0.0.1") || origin.includes("localhost")) {
+      return "";
+    }
+    return `http://127.0.0.1:${apiPort()}`;
+  }
+
   function authToken() {
+    const cfg = window.AgentRelayConfig;
+    if (cfg?.token) return cfg.token;
     return sessionStorage.getItem("agentrelay_token")
       || new URLSearchParams(window.location.search).get("token")
       || "";
   }
 
   function apiPort() {
-    return parseInt(new URLSearchParams(window.location.search).get("port") || "9876", 10);
+    const cfg = window.AgentRelayConfig;
+    if (cfg?.port) return cfg.port;
+    const fromUrl = new URLSearchParams(window.location.search).get("port");
+    const fromStore = sessionStorage.getItem("agentrelay_port");
+    return parseInt(fromUrl || fromStore || "9876", 10);
+  }
+
+  function setBrainstormStatus(message, tone) {
+    const elStatus = document.getElementById("ideas-brainstorm-status");
+    if (!elStatus) return;
+    elStatus.textContent = message || "";
+    elStatus.hidden = !message;
+    elStatus.className = "ideas-brainstorm-status hint"
+      + (tone ? ` ideas-brainstorm-status--${tone}` : "");
   }
 
   function authHeader() {
@@ -57,7 +81,8 @@
       headers: { ...authHeader(), "Content-Type": "application/json" },
     };
     if (body !== undefined) opts.body = JSON.stringify(body);
-    return fetch(path, opts);
+    const url = path.startsWith("http") ? path : `${apiBase()}${path}`;
+    return fetch(url, opts);
   }
 
   async function loadAgents() {
@@ -137,6 +162,7 @@
   function selectIdea(id) {
     _selectedId = id;
     _editing = false;
+    _capturedImageData = null;
     renderList();
     renderForm();
   }
@@ -144,7 +170,7 @@
   function renderFindings(idea) {
     const findings = idea.findings || [];
     if (!findings.length) {
-      return '<p class="hint ideas-findings-empty">No findings yet — ask an agent below.</p>';
+      return '<p class="hint ideas-findings-empty">No findings yet — ask an agent above.</p>';
     }
     return findings.map(f => `
       <article class="ideas-finding" data-finding-id="${f.id}">
@@ -154,7 +180,8 @@
           <button type="button" class="btn ghost small ideas-finding-del" data-id="${f.id}">×</button>
         </div>
         ${f.prompt ? `<p class="ideas-finding-prompt"><em>${escHtml(f.prompt)}</em></p>` : ""}
-        <pre class="ideas-finding-body">${escHtml(f.content)}</pre>
+        ${f.image_data && f.image_data.startsWith("data:image/") ? `<img class="ideas-finding-image" src="${f.image_data}" alt="screenshot">` : ""}
+        ${f.content ? `<pre class="ideas-finding-body">${escHtml(f.content)}</pre>` : ""}
       </article>
     `).join("");
   }
@@ -231,19 +258,19 @@
         </div>
         ${idea.description ? `<p class="ideas-detail-desc">${escHtml(idea.description)}</p>` : ""}
 
-        <section class="ideas-section">
+        <section class="ideas-section ideas-brainstorm-section">
           <h4>Brainstorm with agent</h4>
-          <p class="hint">Pick an agent to analyze feasibility, risks, and implementation options.</p>
+          <p class="hint">Planning only — each reply is saved under Findings and the Concept below is rebuilt automatically. No implementation until you queue or forward.</p>
           <label>Agent
             <select id="ideas-brainstorm-agent">${agentOptions(agent)}</select>
           </label>
           <label>Your question
-            <textarea id="ideas-brainstorm-msg" rows="2" placeholder="What are the main risks? How would you implement this?"></textarea>
+            <textarea id="ideas-brainstorm-msg" rows="3" placeholder="What are the risks? What options should we consider?"></textarea>
           </label>
           <div class="row ideas-action-row">
             <button class="btn primary small" id="ideas-brainstorm-btn" ${_busy ? "disabled" : ""}>Ask agent</button>
-            <button class="btn ghost small" id="ideas-terminal-btn">Open in terminal</button>
           </div>
+          <p id="ideas-brainstorm-status" class="ideas-brainstorm-status hint" hidden></p>
         </section>
 
         <section class="ideas-section">
@@ -252,12 +279,19 @@
           <label>Add finding manually
             <textarea id="ideas-manual-finding" rows="2" placeholder="Paste notes or conclusions…"></textarea>
           </label>
-          <button class="btn ghost small" id="ideas-save-finding-btn">Save finding</button>
+          <div id="ideas-capture-preview" class="ideas-capture-preview" hidden>
+            <img id="ideas-capture-thumb" class="ideas-capture-thumb" src="" alt="screenshot">
+            <button type="button" id="ideas-capture-clear" class="btn ghost small ideas-capture-clear">✕</button>
+          </div>
+          <div class="row ideas-action-row">
+            <button class="btn ghost small" id="ideas-save-finding-btn">Save finding</button>
+            <button class="btn ghost small" id="ideas-attach-screenshot-btn">Attach image</button>
+          </div>
         </section>
 
         <section class="ideas-section">
           <h4>Concept</h4>
-          <p class="hint">Compile research into an execution concept, publish for team discussion, then forward when ready.</p>
+          <p class="hint">Updates automatically when findings change. Edit if needed, then publish for team discussion and forward when ready.</p>
           <textarea id="ideas-concept-editor" class="ideas-concept-editor" rows="8">${escHtml(idea.concept || "")}</textarea>
           <div class="row ideas-action-row">
             <button class="btn ghost small" id="ideas-compile-btn">Build from findings</button>
@@ -277,7 +311,8 @@
         </section>
 
         <section class="ideas-section ideas-exec-section">
-          <h4>Execution</h4>
+          <h4>Execution (when agents are idle)</h4>
+          <p class="hint">Queue or forward only after brainstorming — auto-run runs when no agent terminals are active.</p>
           <div class="row ideas-action-row">
             ${canQueue ? '<button class="btn ghost small" id="ideas-queue-btn">Queue for auto-run</button>' : ""}
             ${canDone ? '<button class="btn ghost small" id="ideas-done-btn">Mark done</button>' : ""}
@@ -292,9 +327,10 @@
   }
 
   function wireFormActions(idea, { canQueue, canDone, published }) {
-    el("ideas-brainstorm-btn")?.addEventListener("click", () => brainstorm(idea.id));
-    el("ideas-terminal-btn")?.addEventListener("click", () => openInTerminal(idea));
+    el("ideas-brainstorm-btn")?.addEventListener("click", () => askAgentApi(idea));
     el("ideas-save-finding-btn")?.addEventListener("click", () => saveManualFinding(idea.id));
+    el("ideas-attach-screenshot-btn")?.addEventListener("click", attachIdeasScreenshot);
+    el("ideas-capture-clear")?.addEventListener("click", clearIdeasCapture);
     el("ideas-compile-btn")?.addEventListener("click", () => compileConcept(idea.id));
     el("ideas-save-concept-btn")?.addEventListener("click", () => saveConcept(idea.id));
     el("ideas-publish-btn")?.addEventListener("click", () => publishConcept(idea.id));
@@ -304,12 +340,6 @@
     if (canDone) el("ideas-done-btn")?.addEventListener("click", () => markDone(idea.id));
     el("ideas-edit-btn")?.addEventListener("click", () => { _editing = true; renderForm(); });
     el("ideas-delete-btn")?.addEventListener("click", () => deleteIdea(idea.id));
-    document.querySelectorAll(".ideas-finding-del").forEach(btn => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        deleteFinding(idea.id, btn.dataset.id);
-      });
-    });
   }
 
   async function patchIdea(id, body) {
@@ -321,62 +351,125 @@
     return data.idea;
   }
 
-  async function brainstorm(id) {
+  async function askAgentApi(idea) {
     const agent = el("ideas-brainstorm-agent")?.value;
     const message = (el("ideas-brainstorm-msg")?.value || "").trim();
-    if (!agent || !message) return;
+    if (!agent || !message) {
+      setBrainstormStatus("Choose an agent and enter a question first.", "warn");
+      return;
+    }
+    const btn = el("ideas-brainstorm-btn");
+    if (btn) btn.disabled = true;
     _busy = true;
-    renderForm();
-    const resp = await apiFetch("POST", `/api/ideas/${id}/brainstorm`, { agent, message });
-    _busy = false;
-    if (!resp.ok) {
-      alert("Brainstorm failed — is the agent CLI available?");
+    setBrainstormStatus(`Asking ${agent}…`, "info");
+    try {
+      const resp = await apiFetch("POST", `/api/ideas/${idea.id}/brainstorm`, { agent, message });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setBrainstormStatus(data.error || "Analysis request failed", "error");
+        return;
+      }
+      const idx = _ideas.findIndex(i => i.id === idea.id);
+      if (idx !== -1 && data.idea) _ideas[idx] = data.idea;
+      el("ideas-brainstorm-msg").value = "";
+      renderList();
       renderForm();
-      return;
+      setBrainstormStatus("Saved to Findings and Concept updated — planning only, not implementing.", "ok");
+    } finally {
+      _busy = false;
+      if (btn) btn.disabled = false;
     }
-    const data = await resp.json();
-    const idx = _ideas.findIndex(i => i.id === id);
-    if (idx !== -1) _ideas[idx] = data.idea;
-    el("ideas-brainstorm-msg").value = "";
-    renderList();
-    renderForm();
-  }
-
-  function openInTerminal(idea) {
-    const agent = el("ideas-brainstorm-agent")?.value;
-    const message = (el("ideas-brainstorm-msg")?.value || "").trim();
-    if (!agent || !message || !window.AgentRelayTerminals?.deliverToAgent) {
-      alert("Select an agent and enter a question first.");
-      return;
-    }
-    const prompt = `[Idea brainstorm: ${idea.title}]\n\n${message}`;
-    const port = apiPort();
-    const token = authToken();
-    window.AgentRelayTerminals.deliverToAgent(agent, port, token, prompt, 5);
-    if (typeof window.showView === "function") window.showView("terminals");
-    else document.querySelector('.nav-item[data-view="terminals"]')?.click();
   }
 
   async function saveManualFinding(id) {
     const content = (el("ideas-manual-finding")?.value || "").trim();
-    if (!content) return;
+    if (!content && !_capturedImageData) return;
     const agent = el("ideas-brainstorm-agent")?.value || "user";
-    const resp = await apiFetch("POST", `/api/ideas/${id}/findings`, { content, agent });
+    const body = { content, agent };
+    if (_capturedImageData) body.image_data = _capturedImageData;
+    const resp = await apiFetch("POST", `/api/ideas/${id}/findings`, body);
     if (!resp.ok) return;
     const data = await resp.json();
     const idx = _ideas.findIndex(i => i.id === id);
     if (idx !== -1) _ideas[idx] = data.idea;
+    _capturedImageData = null;
     renderList();
     renderForm();
   }
 
+  async function attachIdeasScreenshot() {
+    const btn = el("ideas-attach-screenshot-btn");
+    if (btn) btn.disabled = true;
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      try {
+        const video = document.createElement("video");
+        video.srcObject = stream;
+        await new Promise((resolve) => { video.onloadedmetadata = resolve; });
+        await video.play();
+        await new Promise((resolve) => {
+          if (typeof video.requestVideoFrameCallback === "function") {
+            video.requestVideoFrameCallback(resolve);
+          } else {
+            requestAnimationFrame(() => requestAnimationFrame(resolve));
+          }
+        });
+        const src = document.createElement("canvas");
+        src.width = video.videoWidth;
+        src.height = video.videoHeight;
+        src.getContext("2d").drawImage(video, 0, 0);
+        const MAX_W = 900;
+        let dataUrl;
+        if (src.width <= MAX_W) {
+          dataUrl = src.toDataURL("image/jpeg", 0.82);
+        } else {
+          const out = document.createElement("canvas");
+          const ratio = MAX_W / src.width;
+          out.width = MAX_W;
+          out.height = Math.round(src.height * ratio);
+          out.getContext("2d").drawImage(src, 0, 0, out.width, out.height);
+          dataUrl = out.toDataURL("image/jpeg", 0.82);
+        }
+        _capturedImageData = dataUrl;
+        const preview = el("ideas-capture-preview");
+        const thumb = el("ideas-capture-thumb");
+        if (preview && thumb) {
+          thumb.src = dataUrl;
+          preview.hidden = false;
+        }
+      } finally {
+        stream.getTracks().forEach((t) => t.stop());
+      }
+    } catch (e) {
+      if (e.name !== "AbortError" && e.name !== "NotAllowedError") {
+        setBrainstormStatus("Screen capture failed: " + e.message, "error");
+      }
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function clearIdeasCapture() {
+    _capturedImageData = null;
+    const preview = el("ideas-capture-preview");
+    if (preview) preview.hidden = true;
+  }
+
   async function deleteFinding(ideaId, findingId) {
+    if (!findingId) {
+      setBrainstormStatus("Cannot delete — finding has no id (reload ideas)", "error");
+      return;
+    }
     if (!confirm("Remove this finding?")) return;
-    const resp = await apiFetch("DELETE", `/api/ideas/${ideaId}/findings/${findingId}`);
-    if (!resp.ok) return;
+    const resp = await apiFetch("DELETE", `/api/ideas/${ideaId}/findings/${encodeURIComponent(findingId)}`);
+    if (!resp.ok) {
+      setBrainstormStatus("Could not delete finding — check you are logged in", "error");
+      return;
+    }
     const data = await resp.json();
     const idx = _ideas.findIndex(i => i.id === ideaId);
     if (idx !== -1) _ideas[idx] = data.idea;
+    renderList();
     renderForm();
   }
 
@@ -562,6 +655,13 @@
       btn.addEventListener("click", () => {
         if (btn.dataset.view === "ideas") loadIdeas();
       });
+    });
+    formPanel()?.addEventListener("click", (e) => {
+      const btn = e.target.closest(".ideas-finding-del");
+      if (!btn || !_selectedId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      deleteFinding(_selectedId, btn.dataset.id);
     });
     formPanel().innerHTML = '<p class="ideas-form-hint">Select an idea or add a new one.</p>';
   }

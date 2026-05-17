@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from agentrelay import Config
 from idea_store import IdeaStore
 from idea_workflow import brainstorm_prompt, build_concept_document, execution_prompt
 
@@ -23,8 +24,19 @@ class IdeaWorkflowTests(unittest.TestCase):
         updated = self.store.add_finding(
             idea["id"], agent="claude", content="Looks feasible", prompt="Thoughts?",
         )
-        self.assertEqual(updated["status"], "exploring")  # type: ignore[index]
+        self.assertEqual(updated["status"], "ready")  # type: ignore[index]
         self.assertEqual(len(updated["findings"]), 1)  # type: ignore[index]
+        self.assertIn("Feature X", updated["concept"])  # type: ignore[index]
+        self.assertIn("Looks feasible", updated["concept"])  # type: ignore[index]
+
+    def test_sync_concept_preserves_published_status(self) -> None:
+        idea = self.store.create("Published idea")
+        self.store.add_finding(idea["id"], agent="a", content="Note one")
+        self.store.publish_concept(idea["id"])
+        updated = self.store.add_finding(idea["id"], agent="b", content="Note two")
+        self.assertEqual(updated["status"], "concept")  # type: ignore[index]
+        self.assertIsNotNone(updated["concept_published_at"])  # type: ignore[index]
+        self.assertIn("Note two", updated["concept"])  # type: ignore[index]
 
     def test_compile_concept_sets_ready(self) -> None:
         idea = self.store.create("Feature X", description="Do the thing")
@@ -40,11 +52,45 @@ class IdeaWorkflowTests(unittest.TestCase):
         self.assertEqual(published["status"], "concept")  # type: ignore[index]
         self.assertIsNotNone(published["concept_published_at"])  # type: ignore[index]
 
+    def test_resolve_background_adapter_from_interactive(self) -> None:
+        cfg = Config.load_dict({
+            "node_name": "n",
+            "port": 9876,
+            "token": "t" * 32,
+            "adapters": {
+                "claude-interactive": {
+                    "command": ["claude"],
+                    "mode": "interactive",
+                    "timeout": 60,
+                },
+                "claude": {
+                    "command": ["claude", "-p", "{prompt}"],
+                    "timeout": 60,
+                },
+            },
+            "rules": [],
+            "default_action": "agent",
+            "use_tmux": False,
+            "relay": {"wait_before_send_seconds": 3},
+        })
+        self.assertEqual(cfg.resolve_background_adapter_name("claude-interactive"), "claude")
+
     def test_brainstorm_prompt_includes_question(self) -> None:
         idea = self.store.create("Dark mode")
         p = brainstorm_prompt(idea, "How hard is this?")
         self.assertIn("Dark mode", p)
         self.assertIn("How hard is this?", p)
+        self.assertIn("Do NOT", p)
+        self.assertIn("planning", p.lower())
+
+    def test_execution_prompt_requires_publish(self) -> None:
+        idea = self.store.create("Ship it")
+        self.assertEqual(execution_prompt(idea), "")
+        self.store.update(idea["id"], concept="# Plan", status="ready")
+        self.assertEqual(execution_prompt(self.store.get(idea["id"])), "")  # type: ignore[arg-type]
+        self.store.publish_concept(idea["id"])
+        p = execution_prompt(self.store.get(idea["id"]))  # type: ignore[arg-type]
+        self.assertIn("EXECUTE", p)
 
     def test_execution_prompt_uses_concept_when_published(self) -> None:
         idea = self.store.create("Ship it")
@@ -116,8 +162,10 @@ class ApiIdeaBrainstormTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 200)
         body = await resp.json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["idea"]["status"], "exploring")
+        self.assertEqual(body["idea"]["status"], "ready")
         self.assertEqual(len(body["idea"]["findings"]), 1)
+        self.assertIn("Brainstorm me", body["idea"]["concept"])
+        self.assertIn("Agent says yes", body["idea"]["concept"])
 
 
 if __name__ == "__main__":

@@ -24,6 +24,9 @@ _EDITABLE = {
 def _normalize(idea: dict) -> dict:
     idea.setdefault("brainstorm_agent", None)
     idea.setdefault("findings", [])
+    for finding in idea["findings"]:
+        if isinstance(finding, dict) and not finding.get("id"):
+            finding["id"] = uuid.uuid4().hex
     idea.setdefault("concept", "")
     idea.setdefault("concept_published_at", None)
     idea.setdefault("concept_discussions", [])
@@ -115,12 +118,13 @@ class IdeaStore:
         content: str,
         prompt: str = "",
         source: str = "agent",
+        image_data: str = "",
     ) -> dict | None:
         ideas = self._load()
         for idea in ideas:
             if idea.get("id") != idea_id:
                 continue
-            entry = {
+            entry: dict = {
                 "id": uuid.uuid4().hex,
                 "ts": time.time(),
                 "agent": agent,
@@ -128,12 +132,14 @@ class IdeaStore:
                 "prompt": prompt.strip(),
                 "content": content.strip(),
             }
+            if image_data and image_data.startswith("data:image/"):
+                entry["image_data"] = image_data
             idea.setdefault("findings", []).append(entry)
             if idea.get("status") == "draft":
                 idea["status"] = "exploring"
             idea["updated_at"] = time.time()
             self._save(ideas)
-            return _normalize(dict(idea))
+            return self.sync_concept_from_findings(idea_id) or _normalize(dict(idea))
         return None
 
     def remove_finding(self, idea_id: str, finding_id: str) -> dict | None:
@@ -148,15 +154,24 @@ class IdeaStore:
             idea["findings"] = filtered
             idea["updated_at"] = time.time()
             self._save(ideas)
-            return _normalize(dict(idea))
+            return self.sync_concept_from_findings(idea_id) or _normalize(dict(idea))
         return None
 
-    def compile_concept(self, idea_id: str) -> dict | None:
+    def sync_concept_from_findings(self, idea_id: str) -> dict | None:
+        """Rebuild concept markdown from title, description, notes, and findings."""
         idea = self.get(idea_id)
         if not idea:
             return None
         concept = build_concept_document(idea)
-        return self.update(idea_id, concept=concept, status="ready")
+        patch: dict[str, Any] = {"concept": concept}
+        if not idea.get("concept_published_at"):
+            status = idea.get("status")
+            if status in ("draft", "exploring"):
+                patch["status"] = "ready"
+        return self.update(idea_id, **patch)
+
+    def compile_concept(self, idea_id: str) -> dict | None:
+        return self.sync_concept_from_findings(idea_id)
 
     def publish_concept(self, idea_id: str) -> dict | None:
         idea = self.get(idea_id)

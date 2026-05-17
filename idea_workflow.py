@@ -3,6 +3,19 @@ from __future__ import annotations
 
 from typing import Any
 
+# Shown on every brainstorm message — not execution.
+BRAINSTORM_RULES = """\
+BRAINSTORM MODE — planning and discussion only.
+
+Rules for this session:
+- Do NOT write, edit, or create files in the repo.
+- Do NOT run builds, tests, installs, or git commands to implement anything.
+- Do NOT start implementing the feature or bugfix.
+- Reply in conversation only: clarify goals, risks, trade-offs, options, and scope.
+- If asked how to build it, describe approach at a high level only — no code changes yet.
+
+Implementation happens later via AgentRelay when the user explicitly queues execution."""
+
 
 def brainstorm_prompt(idea: dict, user_message: str) -> str:
     title = idea.get("title", "Untitled")
@@ -12,11 +25,10 @@ def brainstorm_prompt(idea: dict, user_message: str) -> str:
     parts = [
         f"[AgentRelay Idea brainstorm — {title}]",
         "",
-        "Help explore and analyze this idea. Focus on feasibility, risks, "
-        "architecture options, and a practical implementation approach.",
+        BRAINSTORM_RULES,
     ]
     if desc:
-        parts.extend(["", "Description:", desc])
+        parts.extend(["", "Idea description:", desc])
     if notes:
         parts.extend(["", "Notes:", notes])
     if prior:
@@ -34,6 +46,8 @@ def build_concept_document(idea: dict) -> str:
         f"# Concept: {title}",
         "",
         f"Priority: {idea.get('priority', 'medium')}",
+        "",
+        "_Planning document — not an instruction to implement yet._",
     ]
     if desc:
         parts.extend(["", "## Summary", desc])
@@ -58,7 +72,7 @@ def build_concept_document(idea: dict) -> str:
         parts.extend(["", "## Additional notes", notes])
     parts.extend([
         "",
-        "## Execution checklist",
+        "## Execution checklist (for later, when explicitly queued)",
         "- [ ] Confirm scope and acceptance criteria",
         "- [ ] Identify files/modules to change",
         "- [ ] Implement core change",
@@ -74,10 +88,10 @@ def concept_discussion_prompt(idea: dict, *, round_note: str = "") -> str:
     title = idea.get("title", "Untitled")
     prior = _format_discussions_brief(idea.get("concept_discussions") or [])
     parts = [
-        f"[AgentRelay Concept — {title}]",
+        f"[AgentRelay Concept review — {title}]",
         "",
-        "A concept is ready for team review. Read it carefully, then share "
-        "concerns, alternatives, and suggestions. Be specific and actionable.",
+        "Review and discuss this concept with other agents. Do NOT implement yet.",
+        "Share concerns, alternatives, and suggestions in conversation only.",
         "",
         "---",
         concept,
@@ -90,7 +104,7 @@ def concept_discussion_prompt(idea: dict, *, round_note: str = "") -> str:
     parts.append("")
     parts.append(
         "Reply with: (1) summary of your view, (2) risks or gaps, "
-        "(3) recommended next steps."
+        "(3) recommended next steps — no code changes."
     )
     return "\n".join(parts)
 
@@ -99,7 +113,8 @@ def execution_prompt(idea: dict) -> str:
     concept = (idea.get("concept") or "").strip()
     if concept and idea.get("concept_published_at"):
         return (
-            f"[AgentRelay Idea — execute concept: {idea.get('title', 'Untitled')}]\n\n"
+            f"[AgentRelay — EXECUTE concept: {idea.get('title', 'Untitled')}]\n\n"
+            "You are cleared to implement now. Use the concept and prior discussion.\n\n"
             f"{concept}\n\n"
             "Implement this concept. Use the checklist and prior discussion "
             "as guidance. Ask if anything is ambiguous before large changes."

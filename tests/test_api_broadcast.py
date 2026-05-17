@@ -1,5 +1,6 @@
 """Global broadcast API."""
 
+import sys
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -14,8 +15,8 @@ def _minimal_cfg() -> Config:
         "port": 9876,
         "token": "test-token-12345678901234567890",
         "adapters": {
-            "claude": {"command": ["echo", "{prompt}"], "timeout": 5},
-            "codex": {"command": ["echo", "{prompt}"], "timeout": 5},
+            "claude": {"command": [sys.executable, "-c", "print('{prompt}')"], "timeout": 5},
+            "codex": {"command": [sys.executable, "-c", "print('{prompt}')"], "timeout": 5},
         },
         "rules": [],
         "default_action": "approve",

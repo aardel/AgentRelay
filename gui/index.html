@@ -251,6 +251,7 @@
             </div>
             <div class="terminal-toolbar-spacer" aria-hidden="true"></div>
             <div class="terminal-toolbar-group terminal-toolbar-layout" aria-label="Pane layout">
+              <button type="button" id="btn-terminal-show-tabs" class="btn ghost small terminal-show-tabs-btn" hidden title="Return to tabbed view">Tabs</button>
               <span class="terminal-toolbar-label">Layout</span>
               <div class="terminal-layout-btns" id="terminal-layout-btns">
                 <button type="button" class="terminal-layout-btn active" data-layout="1" title="Single pane"><svg width="13" height="13" viewBox="0 0 4 4" aria-hidden="true"><rect x="0" y="0" width="4" height="4" rx="0.4" fill="currentColor"/></svg></button>
@@ -259,6 +260,10 @@
                 <button type="button" class="terminal-layout-btn" data-layout="4" title="2×2 grid"><svg width="13" height="13" viewBox="0 0 4 4" aria-hidden="true"><rect x="0" y="0" width="1.7" height="1.7" rx="0.3" fill="currentColor"/><rect x="2.3" y="0" width="1.7" height="1.7" rx="0.3" fill="currentColor"/><rect x="0" y="2.3" width="1.7" height="1.7" rx="0.3" fill="currentColor"/><rect x="2.3" y="2.3" width="1.7" height="1.7" rx="0.3" fill="currentColor"/></svg></button>
               </div>
             </div>
+            <div class="terminal-toolbar-divider" aria-hidden="true"></div>
+            <button type="button" id="btn-screenshot" class="btn ghost small terminal-screenshot-btn" title="Screenshot to agent">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            </button>
             <div class="terminal-toolbar-divider" aria-hidden="true"></div>
             <details class="terminal-toolbar-menu" id="terminal-actions-menu">
               <summary class="btn ghost small terminal-toolbar-menu-btn" aria-label="More actions">More</summary>
@@ -441,5 +446,33 @@
   <script src="/gui/ideas.js"></script>
   <script src="/gui/bugs.js"></script>
   <script src="/gui/app.js"></script>
+
+  <!-- Screenshot modal -->
+  <div id="screenshot-modal" class="screenshot-modal" hidden aria-modal="true" role="dialog" aria-label="Screenshot to agent">
+    <div class="screenshot-modal-backdrop"></div>
+    <div class="screenshot-modal-dialog">
+      <div class="screenshot-modal-header">
+        <span class="screenshot-modal-title">Screenshot to agent</span>
+        <button type="button" id="screenshot-modal-close" class="screenshot-modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="screenshot-modal-body">
+        <div id="screenshot-preview" class="screenshot-preview">
+          <span class="screenshot-preview-hint">Capture your screen or paste an image (Ctrl+V)</span>
+        </div>
+        <div class="screenshot-modal-capture-row">
+          <button type="button" id="btn-screenshot-capture" class="btn ghost small">Capture screen</button>
+          <button type="button" id="btn-screenshot-paste" class="btn ghost small">Paste from clipboard</button>
+        </div>
+        <label class="screenshot-desc-label">
+          Description for the agent
+          <textarea id="screenshot-description" class="screenshot-description" rows="3" placeholder="Describe the issue shown in this screenshot…"></textarea>
+        </label>
+      </div>
+      <div class="screenshot-modal-footer">
+        <button type="button" id="btn-screenshot-cancel" class="btn ghost">Cancel</button>
+        <button type="button" id="btn-screenshot-send" class="btn primary" disabled>Send to agent</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

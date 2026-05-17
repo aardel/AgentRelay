@@ -77,6 +77,27 @@ class IdeaStoreTests(unittest.TestCase):
     def test_update_missing_returns_none(self) -> None:
         self.assertIsNone(self.store.update("bad-id", title="x"))
 
+    def test_normalize_assigns_finding_ids(self) -> None:
+        path = Path(self.tmp.name) / "legacy.json"
+        path.write_text(json.dumps([{
+            "id": "idea1",
+            "title": "Legacy",
+            "status": "draft",
+            "priority": "medium",
+            "created_at": 1.0,
+            "findings": [{"agent": "claude", "content": "old note", "ts": 1.0}],
+        }]), encoding="utf-8")
+        store = IdeaStore(path=path)
+        ideas = store.list_all()
+        self.assertTrue(ideas[0]["findings"][0].get("id"))
+
+    def test_remove_finding(self) -> None:
+        idea = self.store.create("F")
+        updated = self.store.add_finding(idea["id"], agent="a", content="x")
+        fid = updated["findings"][0]["id"]  # type: ignore[index]
+        after = self.store.remove_finding(idea["id"], fid)
+        self.assertEqual(len(after["findings"]), 0)  # type: ignore[index]
+
     def test_delete_existing(self) -> None:
         idea = self.store.create("Delete me")
         self.assertTrue(self.store.delete(idea["id"]))

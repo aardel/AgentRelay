@@ -9,6 +9,9 @@ from pty_session import pty_registry
 
 
 class WindowsDeliveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        agentrelay._gui_delivery_queue.clear()
+
     def test_interactive_queue_includes_adapter_name(self):
         adapter = AdapterConfig(
             name="codex-interactive",
