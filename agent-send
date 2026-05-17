@@ -298,7 +298,8 @@ async def cmd_send(token: str, target: str, command: str,
                    agent: str | None, policy_hint: str | None,
                    cfg: dict[str, Any] | None = None,
                    self_name: str | None = None,
-                   profile: str | None = None) -> int:
+                   profile: str | None = None,
+                   force: bool = False) -> int:
     cfg = cfg or {}
     # Use daemon registry first (instant, heartbeat-maintained); fall back to mDNS
     daemon_peers = await discover_from_daemon(cfg)
@@ -328,10 +329,17 @@ async def cmd_send(token: str, target: str, command: str,
         if active_on_target:
             requested = agent or cfg.get("default_agent") or "claude"
             if requested not in active_on_target:
+                if not force:
+                    print(
+                        f"error: '{requested}' is not running on {target}.\n"
+                        f"  Active agents: {', '.join(active_on_target)}\n"
+                        f"  Use --force to send anyway, or target one of the active agents above.",
+                        file=sys.stderr,
+                    )
+                    return 1
                 print(
                     f"warning: '{requested}' is not running on {target} "
-                    f"(active: {', '.join(active_on_target)}). "
-                    f"Message will still be delivered but may be unroutable.",
+                    f"(active: {', '.join(active_on_target)}). Sending anyway (--force).",
                     file=sys.stderr,
                 )
         elif agent:
@@ -416,6 +424,8 @@ def main() -> None:
     p.add_argument("--profile", choices=("safe", "project_write", "full_auto"),
                    default="safe",
                    help="permission profile recorded with the task (default: safe)")
+    p.add_argument("--force", action="store_true",
+                   help="send even if the target agent is not currently active")
     p.add_argument("--broadcast", action="store_true",
                    help="send to all discovered peers (no synthesis)")
     p.add_argument("--local", action="store_true",
@@ -465,7 +475,7 @@ def main() -> None:
 
     sys.exit(asyncio.run(cmd_send(
         token, target, args.command, agent, args.hint, cfg_data,
-        self_name=node_name, profile=args.profile)))
+        self_name=node_name, profile=args.profile, force=args.force)))
 
 
 if __name__ == "__main__":

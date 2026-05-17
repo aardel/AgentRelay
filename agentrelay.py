@@ -1210,6 +1210,7 @@ class AgentRelay:
                f"Request from {from_node}: {message[:50]}")
         ok = result.get("exit_code", 1) == 0 or result.get("status") in (
             "sent", "queued", "spawned")
+        full_message = (header if adapter.mode in INTERACTIVE_MODES else "") + message
         return web.json_response({
             "ok": ok,
             "node": self.cfg.node_name,
@@ -1218,6 +1219,7 @@ class AgentRelay:
             "delivery": "forward",
             "requested_agent": requested_agent,
             "resolved_agent": to_agent,
+            "bytes_accepted": len(full_message.encode("utf-8")),
             **result,
         })
 
@@ -2421,7 +2423,7 @@ class AgentRelay:
         return web.json_response({"ok": True, "messages": results})
 
     def build_app(self) -> web.Application:
-        app = web.Application(client_max_size=1024 * 1024)
+        app = web.Application(client_max_size=16 * 1024 * 1024)  # 16 MB — large agent prompts can exceed 1 MB
         app.router.add_get("/health", self.handle_health)
         app.router.add_get("/pending-deliveries", self.handle_pending_deliveries)
         app.router.add_get("/inbox", self.handle_inbox)

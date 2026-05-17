@@ -858,9 +858,16 @@ def forward_to_peer(
                 data = await resp.json()
                 return resp.status, data
 
+    sent_bytes = len(message.encode("utf-8"))
     try:
         status, data = _run(_post())
         if status == 200 and data.get("ok"):
+            accepted = data.get("bytes_accepted")
+            if accepted is not None and accepted < sent_bytes:
+                return False, (
+                    f"Truncated: sent {sent_bytes} bytes but remote accepted "
+                    f"{accepted} bytes."
+                )
             detail = (data.get("stdout") or data.get("status") or "Forwarded").strip()
             return True, detail or "Forwarded to agent window"
         err = data.get("error") or data.get("stderr") or f"HTTP {status}"
