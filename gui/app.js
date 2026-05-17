@@ -38,6 +38,9 @@ const el = (id) => document.getElementById(id);
 let sendTargets = [];
 let sshHosts = [];
 let lastInboxTs = 0;
+let collabTargets = [];
+const selectedCollab = new Map();
+const collabThread = [];
 
 const YOLO_STORAGE_KEY = "agentrelay_yolo_mode";
 const PROFILE_STORAGE_KEY = "agentrelay_launch_profile";
@@ -152,6 +155,8 @@ function showView(name) {
   if (nav) nav.classList.add("active");
   if (name === "ideas" && window.ideasLoad) window.ideasLoad();
   if (name === "bugs" && window.bugsLoad) window.bugsLoad();
+  if (name === "github") refreshGithubStatus();
+  if (name === "project") refreshProjectView();
 }
 window.showView = showView;
 
@@ -233,21 +238,123 @@ async function loadResumeSessions(selectId, agent) {
   const sel = el(selectId);
   if (!sel || !agent) return;
   const prev = sel.value;
-  sel.innerHTML = "<option value=\"\">No session (fresh start)</option>";
+  sel.innerHTML = "<option value=\"\">Fresh start</option>";
   try {
     const { ok, data } = await api(`/api/sessions/${encodeURIComponent(agent)}`);
     if (ok && data.sessions && data.sessions.length) {
+      const projectHint = data.project_path
+        ? ` (in ${data.project_path.split(/[/\\]/).pop()})`
+        : "";
       for (const s of data.sessions) {
         const opt = document.createElement("option");
         opt.value = s.sessionId;
-        const cwd = s.cwd ? s.cwd.replace(/.*\//, "") || s.cwd : "";
+        const folder = s.cwd ? s.cwd.split(/[/\\]/).pop() || s.cwd : "";
         const date = s.startedAt ? new Date(s.startedAt).toLocaleString() : s.procStart;
-        opt.textContent = `${date}${cwd ? " · " + cwd : ""}`;
+        opt.textContent = `${date}${folder ? " · " + folder : ""}${projectHint}`;
         sel.appendChild(opt);
       }
       if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    } else if (data.project_path) {
+      const hint = document.createElement("option");
+      hint.disabled = true;
+      hint.textContent = "No sessions for this project yet";
+      sel.appendChild(hint);
     }
   } catch { /* ignore */ }
+}
+
+async function refreshProjectView() {
+  const summary = el("project-active-summary");
+  const list = el("project-recent-list");
+  const pathInput = el("project-path-input");
+  const { ok, data } = await api("/api/projects");
+  const activeResp = await api("/api/projects/active");
+  const active = activeResp.ok ? activeResp.data.active : null;
+
+  if (active && summary) {
+    let text = `${active.name} — ${active.local_path}`;
+    if (active.branch) text += ` · branch ${active.branch}`;
+    if (active.dirty) text += " · unsaved file changes";
+    summary.textContent = text;
+    if (pathInput) pathInput.value = active.local_path;
+  } else if (summary) {
+    summary.textContent = "No project loaded — agents start in the default folder.";
+  }
+
+  if (!list) return;
+  list.innerHTML = "";
+  const projects = ok ? (data.projects || []) : [];
+  if (!projects.length) {
+    list.innerHTML = "<li class=\"empty\">No recent projects yet.</li>";
+    return;
+  }
+  for (const p of projects) {
+    const li = document.createElement("li");
+    const row = document.createElement("div");
+    row.className = "project-recent-item";
+    const label = document.createElement("span");
+    label.textContent = `${p.name} — ${p.local_path}`;
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "btn ghost small";
+    openBtn.textContent = "Open";
+    openBtn.addEventListener("click", () => openProjectPath(p.local_path));
+    row.appendChild(label);
+    row.appendChild(openBtn);
+    li.appendChild(row);
+    list.appendChild(li);
+  }
+  reloadResumeSessionsForAgents();
+}
+
+async function openProjectPath(path) {
+  const status = el("project-open-status");
+  if (status) status.textContent = "Opening…";
+  const { ok, data } = await api("/api/projects/open", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+  if (!ok) {
+    if (status) status.textContent = data?.error || "Could not open project.";
+    setFooter(status?.textContent || "Open project failed");
+    return;
+  }
+  if (status) status.textContent = `Opened ${data.project?.name || "project"}.`;
+  setFooter("Project loaded — new terminals use this folder.");
+  await refreshProjectView();
+}
+
+el("btn-project-pick")?.addEventListener("click", async () => {
+  const { ok, data } = await api("/api/projects/pick", { method: "POST" });
+  if (ok && data.path) el("project-path-input").value = data.path;
+});
+
+el("btn-project-open")?.addEventListener("click", async () => {
+  const path = (el("project-path-input")?.value || "").trim();
+  if (!path) {
+    setFooter("Enter or browse to a project folder first");
+    return;
+  }
+  await openProjectPath(path);
+});
+
+el("btn-project-clear")?.addEventListener("click", async () => {
+  const { ok } = await api("/api/projects/active", {
+    method: "POST",
+    body: JSON.stringify({ id: null }),
+  });
+  if (ok) {
+    setFooter("Project cleared");
+    if (el("project-path-input")) el("project-path-input").value = "";
+    await refreshProjectView();
+  }
+});
+
+function reloadResumeSessionsForAgents() {
+  const termAgent = el("terminal-agent");
+  const launchAgent = el("launch-agent");
+  if (termAgent?.value) loadResumeSessions("terminal-resume-session", termAgent.value);
+  if (launchAgent?.value) loadResumeSessions("agents-resume-session", launchAgent.value);
 }
 
 function renderNearby(list) {
@@ -354,6 +461,145 @@ function renderSendAgents() {
   }
 }
 
+function collabKey(target) {
+  return `${target.node}\u0000${target.agent}`;
+}
+
+function collabDisplay(target) {
+  return `${target.node}/${target.agent}`;
+}
+
+function selectedCollabTargets() {
+  return [...selectedCollab.values()];
+}
+
+async function refreshCollaborationTargets() {
+  const wrap = el("terminal-collab-targets");
+  if (!wrap) return;
+  const { ok, data } = await api("/api/collaboration/targets");
+  if (!ok) {
+    collabTargets = [];
+    renderCollaborationRail();
+    return;
+  }
+  collabTargets = data.targets || [];
+  const activeKeys = new Set(collabTargets.map(collabKey));
+  for (const key of [...selectedCollab.keys()]) {
+    if (!activeKeys.has(key)) selectedCollab.delete(key);
+  }
+  renderCollaborationRail();
+}
+
+function renderCollaborationRail() {
+  const wrap = el("terminal-collab-targets");
+  const empty = el("terminal-collab-empty");
+  if (!wrap || !empty) return;
+  wrap.innerHTML = "";
+  empty.hidden = collabTargets.length > 0;
+  for (const target of collabTargets) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "terminal-collab-btn";
+    btn.textContent = collabDisplay(target);
+    btn.title = target.local
+      ? `Active local terminal: ${target.agent}`
+      : `Active terminal on ${target.node}: ${target.agent}`;
+    btn.classList.toggle("selected", selectedCollab.has(collabKey(target)));
+    btn.addEventListener("click", () => toggleCollaborationTarget(target));
+    wrap.appendChild(btn);
+  }
+  syncCollabComposer();
+}
+
+function toggleCollaborationTarget(target) {
+  const key = collabKey(target);
+  if (selectedCollab.has(key)) selectedCollab.delete(key);
+  else selectedCollab.set(key, target);
+  renderCollaborationRail();
+  if (selectedCollab.size >= 2) showCollabComposer();
+  else hideCollabComposer();
+}
+
+function showCollabComposer() {
+  const composer = el("collab-composer");
+  if (!composer) return;
+  composer.hidden = false;
+  syncCollabComposer();
+  el("collab-message")?.focus();
+}
+
+function hideCollabComposer() {
+  const composer = el("collab-composer");
+  if (composer) composer.hidden = true;
+}
+
+function syncCollabComposer() {
+  const targets = selectedCollabTargets();
+  const targetText = targets.map(collabDisplay).join(", ");
+  const label = el("collab-composer-targets");
+  if (label) label.textContent = targetText || "Select two or more active agents";
+  renderCollabThread();
+}
+
+function renderCollabThread() {
+  const log = el("collab-thread-log");
+  if (!log) return;
+  log.innerHTML = "";
+  for (const item of collabThread.slice(-6)) {
+    const entry = document.createElement("div");
+    entry.className = "collab-thread-entry";
+    entry.innerHTML = `
+      <strong>${escHtml(item.mode)}</strong>
+      <span>${escHtml(item.time)} - ${escHtml(item.result)}</span>
+      <div>${escHtml(item.message)}</div>`;
+    log.appendChild(entry);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendCollaborationRound() {
+  const targets = selectedCollabTargets();
+  const message = el("collab-message").value.trim();
+  const mode = el("collab-mode").value || "shared";
+  if (targets.length < 2) {
+    el("collab-status").textContent = "Select at least two active agents.";
+    return;
+  }
+  if (!message) {
+    el("collab-status").textContent = "Enter a message.";
+    return;
+  }
+
+  const btn = el("btn-collab-send");
+  btn.disabled = true;
+  el("collab-status").textContent = "Sending...";
+  const { ok, data } = await api("/api/collaboration/send", {
+    method: "POST",
+    body: JSON.stringify({
+      mode,
+      message,
+      targets: targets.map((t) => ({ node: t.node, agent: t.agent })),
+    }),
+  });
+  btn.disabled = false;
+  if (!ok) {
+    el("collab-status").textContent = data.error || "Collaboration send failed.";
+    return;
+  }
+
+  const result = `${data.succeeded}/${data.sent_to} delivered`;
+  collabThread.push({
+    mode: mode === "roles" ? "Auto roles" : "Shared instruction",
+    time: new Date().toLocaleTimeString(),
+    result,
+    message,
+  });
+  el("collab-message").value = "";
+  el("collab-status").textContent = result;
+  setFooter(`Collaboration round sent: ${result}`);
+  renderCollabThread();
+}
+
 function renderPending(list) {
   const card = el("pending-card");
   const ul = el("pending-list");
@@ -455,6 +701,11 @@ async function refresh() {
   renderAgents(data.agents || [], data.agents_missing || []);
   renderNearby(data.nearby || []);
   renderSendTargets(data);
+  refreshCollaborationTargets();
+  if (data.active_project && el("project-active-summary")) {
+    el("project-active-summary").textContent =
+      `${data.active_project.name} — ${data.active_project.local_path}`;
+  }
 
   if (!data.agents?.length && data.agents_missing?.length) {
     const names = data.agents_missing.map((a) => a.executable || a.id).join(", ");
@@ -804,6 +1055,9 @@ el("btn-send-snippet-terminal").addEventListener("click", () => {
     : "Open a live terminal tab first");
   if (sent) showView("terminals");
 });
+
+el("btn-collab-close")?.addEventListener("click", hideCollabComposer);
+el("btn-collab-send")?.addEventListener("click", sendCollaborationRound);
 
 el("send-target").addEventListener("change", renderSendAgents);
 
@@ -1506,54 +1760,127 @@ setInterval(async () => {
   }
 }, 3000);
 
-el("btn-get-latest")?.addEventListener("click", async () => {
-  const btn = el("btn-get-latest");
-  const status = el("update-status");
-  btn.disabled = true;
-  btn.textContent = "Checking…";
-  status.textContent = "";
-  const { ok, data } = await api("/api/update/pull", { method: "POST" });
-  btn.disabled = false;
-  btn.textContent = "Get latest files";
+async function refreshGithubStatus() {
+  const box = el("github-status-text");
+  if (!box) return;
+  box.textContent = "Checking…";
+  const { ok, data } = await api("/api/github/status");
   if (!ok) {
-    status.textContent = data.error || "Could not check for updates.";
+    box.textContent = data?.message || data?.error || "Could not read status.";
     return;
   }
-  status.textContent = data.message || (data.already_current ? "Already up to date." : "Updated.");
-  setFooter(data.message || "");
+  box.textContent = data.summary || "Ready.";
+}
+
+document.querySelectorAll("[data-view-jump]").forEach((btn) => {
+  btn.addEventListener("click", () => showView(btn.dataset.viewJump));
+});
+
+el("btn-github-pull")?.addEventListener("click", async () => {
+  const btn = el("btn-github-pull");
+  const status = el("github-pull-status");
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Downloading…";
+  const { ok, data } = await api("/api/update/pull", { method: "POST" });
+  if (btn) btn.disabled = false;
+  if (!ok) {
+    if (status) status.textContent = data?.error || data?.message || "Could not get latest files.";
+    setFooter(status?.textContent || "Update failed");
+    return;
+  }
+  const msg = data.message || (data.already_current ? "Already up to date." : "Updated.");
+  if (status) status.textContent = msg;
+  setFooter(msg);
+  refreshGithubStatus();
+});
+
+el("btn-github-push")?.addEventListener("click", async () => {
+  const btn = el("btn-github-push");
+  const status = el("github-push-status");
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Sending…";
+  const { ok, data } = await api("/api/update/push", { method: "POST" });
+  if (btn) btn.disabled = false;
+  if (!ok) {
+    if (status) status.textContent = data?.message || data?.error || "Send failed.";
+    setFooter(status?.textContent || "Send failed");
+    return;
+  }
+  if (status) status.textContent = data.message || "Sent.";
+  setFooter(data.message || "Sent to GitHub");
+  refreshGithubStatus();
+});
+
+el("btn-github-reload-ui")?.addEventListener("click", () => {
+  setFooter("Refreshing interface…");
+  window.location.reload();
+});
+
+el("btn-github-restart")?.addEventListener("click", async () => {
+  if (!confirm("Restart AgentRelay now? Open terminals will close.")) return;
+  const btn = el("btn-github-restart");
+  const status = el("github-restart-status");
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Restarting…";
+  const { ok, data } = await api("/api/app/restart", { method: "POST" });
+  if (!ok) {
+    if (btn) btn.disabled = false;
+    if (status) status.textContent = data?.message || data?.error || "Restart failed.";
+    setFooter(status?.textContent || "Restart failed");
+    return;
+  }
+  if (status) status.textContent = data.message || "Restarting…";
+  setFooter("Restarting — the window may close and reopen.");
 });
 
 // ── Screenshot modal ──────────────────────────────────────────────────────────
 
 let _screenshotCanvas = null;
 let _screenshotStream = null;
+let _screenshotWired = false;
 
 function openScreenshotModal() {
-  el("screenshot-modal").hidden = false;
-  el("screenshot-description").focus();
+  const modal = el("screenshot-modal");
+  if (!modal) {
+    setFooter("Screenshot UI not loaded — refresh the page");
+    return;
+  }
+  modal.hidden = false;
+  el("screenshot-description")?.focus();
 }
 
 function closeScreenshotModal() {
-  el("screenshot-modal").hidden = true;
+  const modal = el("screenshot-modal");
+  if (!modal) return;
+  modal.hidden = true;
   if (_screenshotStream) {
     _screenshotStream.getTracks().forEach((t) => t.stop());
     _screenshotStream = null;
   }
   _screenshotCanvas = null;
-  el("screenshot-preview").innerHTML = '<span class="screenshot-preview-hint">Capture your screen or paste an image (Ctrl+V)</span>';
-  el("screenshot-description").value = "";
-  el("btn-screenshot-send").disabled = true;
+  const preview = el("screenshot-preview");
+  if (preview) {
+    preview.innerHTML = '<span class="screenshot-preview-hint">Capture your screen or paste an image (Ctrl+V)</span>';
+  }
+  const desc = el("screenshot-description");
+  if (desc) desc.value = "";
+  const sendBtn = el("btn-screenshot-send");
+  if (sendBtn) sendBtn.disabled = true;
+  const fileInput = el("btn-screenshot-file");
+  if (fileInput) fileInput.value = "";
 }
 
 function _setScreenshotCanvas(canvas) {
   _screenshotCanvas = canvas;
   const preview = el("screenshot-preview");
+  if (!preview) return;
   preview.innerHTML = "";
   const img = document.createElement("img");
   img.src = canvas.toDataURL("image/png");
   img.className = "screenshot-preview-img";
   preview.appendChild(img);
-  el("btn-screenshot-send").disabled = false;
+  const sendBtn = el("btn-screenshot-send");
+  if (sendBtn) sendBtn.disabled = false;
 }
 
 async function _blobToCanvas(blob) {
@@ -1566,17 +1893,13 @@ async function _blobToCanvas(blob) {
   return canvas;
 }
 
-el("btn-screenshot")?.addEventListener("click", openScreenshotModal);
-el("screenshot-modal-close")?.addEventListener("click", closeScreenshotModal);
-el("btn-screenshot-cancel")?.addEventListener("click", closeScreenshotModal);
-el("screenshot-modal")?.addEventListener("click", (e) => {
-  if (e.target === el("screenshot-modal")) closeScreenshotModal();
-});
-
-el("btn-screenshot-capture")?.addEventListener("click", async () => {
+async function captureScreenshotFromDisplay() {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    throw new Error("Screen capture is not supported in this window — use Choose file or Paste");
+  }
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+  _screenshotStream = stream;
   try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-    _screenshotStream = stream;
     const video = document.createElement("video");
     video.srcObject = stream;
     await new Promise((resolve) => { video.onloadedmetadata = resolve; });
@@ -1592,68 +1915,114 @@ el("btn-screenshot-capture")?.addEventListener("click", async () => {
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     canvas.getContext("2d").drawImage(video, 0, 0);
+    _setScreenshotCanvas(canvas);
+  } finally {
     stream.getTracks().forEach((t) => t.stop());
     _screenshotStream = null;
-    _setScreenshotCanvas(canvas);
-  } catch (e) {
-    if (e.name !== "AbortError" && e.name !== "NotAllowedError") {
-      setFooter("Screen capture failed: " + e.message);
-    }
   }
-});
+}
 
-el("btn-screenshot-paste")?.addEventListener("click", async () => {
-  try {
-    const items = await navigator.clipboard.read();
+function wireScreenshotModal() {
+  if (_screenshotWired) return;
+  const modal = el("screenshot-modal");
+  if (!modal) return;
+  _screenshotWired = true;
+
+  el("btn-screenshot")?.addEventListener("click", openScreenshotModal);
+  el("screenshot-modal-close")?.addEventListener("click", closeScreenshotModal);
+  el("btn-screenshot-cancel")?.addEventListener("click", closeScreenshotModal);
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal || e.target.classList.contains("screenshot-modal-backdrop")) {
+      closeScreenshotModal();
+    }
+  });
+
+  el("btn-screenshot-capture")?.addEventListener("click", async () => {
+    const btn = el("btn-screenshot-capture");
+    if (btn) btn.disabled = true;
+    try {
+      await captureScreenshotFromDisplay();
+    } catch (e) {
+      if (e.name !== "AbortError" && e.name !== "NotAllowedError") {
+        setFooter("Screen capture failed: " + e.message);
+      }
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-screenshot-paste")?.addEventListener("click", async () => {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const imageType = item.types.find((t) => t.startsWith("image/"));
+        if (imageType) {
+          const blob = await item.getType(imageType);
+          _setScreenshotCanvas(await _blobToCanvas(blob));
+          return;
+        }
+      }
+      setFooter("No image found in clipboard");
+    } catch {
+      setFooter("Clipboard read failed — try Ctrl+V with the modal focused");
+    }
+  });
+
+  el("btn-screenshot-file")?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !file.type.startsWith("image/")) {
+      setFooter("Choose an image file (PNG, JPG, etc.)");
+      return;
+    }
+    try {
+      _setScreenshotCanvas(await _blobToCanvas(file));
+    } catch (err) {
+      setFooter("Could not load image: " + err.message);
+    }
+  });
+
+  modal.addEventListener("paste", async (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
     for (const item of items) {
-      const imageType = item.types.find((t) => t.startsWith("image/"));
-      if (imageType) {
-        const blob = await item.getType(imageType);
-        _setScreenshotCanvas(await _blobToCanvas(blob));
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        const blob = item.getAsFile();
+        if (blob) _setScreenshotCanvas(await _blobToCanvas(blob));
         return;
       }
     }
-    setFooter("No image found in clipboard");
-  } catch (e) {
-    setFooter("Clipboard read failed — try Ctrl+V with the modal focused");
-  }
-});
+  });
 
-el("screenshot-modal")?.addEventListener("paste", async (e) => {
-  const items = e.clipboardData?.items;
-  if (!items) return;
-  for (const item of items) {
-    if (item.type.startsWith("image/")) {
-      e.preventDefault();
-      const blob = item.getAsFile();
-      _setScreenshotCanvas(await _blobToCanvas(blob));
-      return;
+  el("btn-screenshot-send")?.addEventListener("click", async () => {
+    if (!_screenshotCanvas) return;
+    const sendBtn = el("btn-screenshot-send");
+    if (sendBtn) sendBtn.disabled = true;
+    const dataUrl = _screenshotCanvas.toDataURL("image/png");
+    const description = (el("screenshot-description")?.value || "").trim();
+    try {
+      const { ok, data } = await api("/api/screenshot", {
+        method: "POST",
+        body: JSON.stringify({ data: dataUrl }),
+      });
+      if (!ok) {
+        setFooter(data?.error || "Screenshot upload failed");
+        if (sendBtn) sendBtn.disabled = false;
+        return;
+      }
+      const filePath = data.path;
+      const message = description
+        ? `${description}\n\nScreenshot: ${filePath}`
+        : `Screenshot: ${filePath}`;
+      const sent = window.AgentRelayTerminals?.sendToActiveTerminal(message + "\r");
+      if (!sent) relayContent(message);
+      closeScreenshotModal();
+      setFooter(sent ? "Screenshot sent to active terminal" : "Screenshot saved — paste path from send form");
+    } catch (e) {
+      setFooter("Screenshot send failed: " + e.message);
+      if (sendBtn) sendBtn.disabled = false;
     }
-  }
-});
+  });
+}
 
-el("btn-screenshot-send")?.addEventListener("click", async () => {
-  if (!_screenshotCanvas) return;
-  const dataUrl = _screenshotCanvas.toDataURL("image/png");
-  const description = el("screenshot-description").value.trim();
-  try {
-    const { ok, data } = await api("/api/screenshot", {
-      method: "POST",
-      body: JSON.stringify({ data: dataUrl }),
-    });
-    if (!ok) {
-      setFooter("Screenshot upload failed");
-      return;
-    }
-    const filePath = data.path;
-    const message = description
-      ? `${description}\n\nScreenshot: ${filePath}`
-      : `Screenshot: ${filePath}`;
-    const sent = window.AgentRelayTerminals?.sendToActiveTerminal(message);
-    if (!sent) relayContent(message);
-    closeScreenshotModal();
-    setFooter("Screenshot sent to agent");
-  } catch (e) {
-    setFooter("Screenshot send failed: " + e.message);
-  }
-});
+wireScreenshotModal();

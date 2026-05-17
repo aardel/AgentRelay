@@ -75,7 +75,8 @@ git pull
 - [x] **Settings → Updates** panel: “Check for updates” / “This machine is up to date” (no `git` words in the UI).
 - [x] One-click **Get latest on this machine** (runs get-latest + install hook, shows success/failure in plain English).
 - [ ] Optional reminder when a peer’s AgentRelay version looks older (compare version from `/api/status`).
-- [ ] Short in-app blurb: *“GitHub keeps all your computers on the same AgentRelay build. You only need to get latest after someone changes the project.”*
+- [x] Dedicated **GitHub** tab with friendly action names, short descriptions, refresh UI, and restart app.
+- [x] Short in-app blurb on the GitHub tab.
 
 **Out of scope for vibe-coder docs:** teaching branches, rebases, pull requests, or commit graphs. Link power users to standard git docs if needed.
 
@@ -102,9 +103,11 @@ Legend: **Done** · **Partial** · **Not started**
 | Past chats (talk threads) | **Done** | `talk.py`, Past chats tab |
 | Remote terminal attach from other computers | **Done** | Activity Open can attach to peer sessions |
 | Remote SSH terminal tabs | **Done** | Saved SSH presets can open shell tabs |
+| Live terminal collaboration rail | **Not started** | Planned Phase 2: compact active-agent selector plus persistent collaboration composer |
 | Dedicated Machines / Permissions / Logs views | **Not started** | Folded into Home / Settings for now |
 | Activity / audit log (full history) | **Not started** | Inbox + Activity cover basics |
-| In-app “get latest files” (no git words) | **Done** | Settings button runs update/install flow |
+| In-app “get latest files” (no git words) | **Done** | GitHub tab: get latest, send changes, refresh UI, restart |
+| Load project (MVP) | **Partial** | Project tab: open folder, active cwd for terminals, resume filtered by path |
 | Terminal usage bar MVP | **Done** | PTY output parser + per-session usage API + UI strip |
 | Workflow builder, file sync, policy files | **Not started** | Phase 3+ |
 
@@ -148,6 +151,7 @@ AgentRelay should include terminal panes so agent sessions can be launched and m
 - Remote SSH terminal tabs.
 - Named sessions for Codex, Claude, Gemini, and other agents.
 - Split panes for side-by-side local and remote work.
+- Compact collaboration rail showing active local and remote agent terminals only.
 - Session restore after app restart where possible.
 - Terminal output search.
 - Copy selected output.
@@ -155,6 +159,29 @@ AgentRelay should include terminal panes so agent sessions can be launched and m
 - Launch an agent into a selected terminal.
 - Attach to existing tmux sessions such as `agentrelay-codex`.
 - **Usage strip under each terminal tab** (when the agent supports it) — see below.
+
+### Live Terminal Collaboration Rail (Phase 2)
+
+Add a small collaboration section to the Live terminals view that shows **active agent terminals only**, across this computer and connected peers. It should not show merely configured or unavailable agents. Each active terminal appears as a compact button grouped by machine, for example `local/codex`, `mac/claude`, `pc/gemini`.
+
+#### UI behavior
+
+- Buttons are small and secondary so they do not take over the terminal UI.
+- Default state is red: active terminal is visible but not participating in collaboration.
+- Selected state is green: terminal is included in the current collaboration group.
+- Selecting two or more active agents opens a floating collaboration composer.
+- The composer lets the user choose the collaboration mode on the fly:
+  - **Shared instruction**: send the same collaboration prompt to every selected agent.
+  - **Auto roles**: AgentRelay assigns roles such as implementer, critic/reviewer, researcher, or synthesizer based on selected agents.
+- The composer creates a lightweight persistent collaboration thread: prompt, selected agents, mode, delivery results, timestamps, and follow-up rounds.
+
+#### Agent instructions
+
+Every collaboration prompt should tell the selected agents that they are working as a group. Agents should split work, challenge assumptions, point out risks, avoid reflexive agreement, and converge on a better result. The goal is a critical discussion that improves the final product, not a broadcast where every agent independently agrees.
+
+#### Version 2 scope
+
+V2 should keep response handling practical: send prompts into selected active terminals and track the collaboration thread in the UI. Automatic response collection, transcript synthesis, and final summary generation can follow after the basic collaboration loop is stable.
 
 ### Terminal Usage & Token Estimates
 
@@ -482,7 +509,8 @@ The first implementation pass should focus on high-value foundations.
 - Launch remote agents into SSH terminals.
 - Trust levels for peers.
 - tmux session integration (optional layer when building SSH remote attach).
-- **Load project (MVP)** — open folder, bind `cwd` to terminals/tasks, recent projects list.
+- **Live terminal collaboration rail** - compact active-agent buttons for local and remote terminals, floating persistent composer, on-the-fly mode choice between shared instruction and auto-assigned roles.
+- **Load project (MVP)** — **in progress:** Project tab, bind `cwd` to agent terminals, resume sessions scoped to project path; tasks/delegation still global.
 - Project-specific launch presets and per-project AgentRelay rules snippet.
 - **Terminal usage bar (MVP)** — parse or native usage where supported; show used/remaining; basic tokens/min EMA.
 

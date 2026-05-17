@@ -357,6 +357,60 @@ textarea { resize: vertical; min-height: 5rem; }
   border-bottom: 1px solid var(--border);
 }
 
+.terminal-collab-rail {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+  padding: 0.3rem 0.55rem;
+  background: #131820;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.terminal-collab-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.terminal-collab-targets {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.terminal-collab-empty {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.terminal-collab-btn {
+  flex: 0 0 auto;
+  border: 1px solid #8b2f35;
+  background: rgba(248, 81, 73, 0.13);
+  color: #ffaaa5;
+  border-radius: 5px;
+  padding: 0.17rem 0.42rem;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.terminal-collab-btn:hover {
+  border-color: #f85149;
+  color: #ffd1ce;
+}
+
+.terminal-collab-btn.selected {
+  border-color: #2ea043;
+  background: rgba(63, 185, 80, 0.15);
+  color: #9be9a8;
+}
+
 .terminal-toolbar-menu {
   position: relative;
 }
@@ -485,6 +539,101 @@ textarea { resize: vertical; min-height: 5rem; }
 .terminal-tab-close:hover {
   background: rgba(255, 255, 255, 0.1);
   color: var(--text);
+}
+
+.collab-composer {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 2.4rem;
+  z-index: 80;
+  width: min(30rem, calc(100vw - 2rem));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #161b22;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.collab-composer-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.collab-composer-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.collab-composer-targets {
+  color: var(--muted);
+  font-size: 0.76rem;
+  margin-top: 0.15rem;
+}
+
+.collab-composer-close {
+  align-self: flex-start;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.collab-composer-close:hover {
+  color: var(--text);
+}
+
+.collab-composer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.85rem 0.9rem;
+}
+
+.collab-composer textarea {
+  resize: vertical;
+  min-height: 6rem;
+}
+
+.collab-thread-log {
+  max-height: 8rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.55rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.collab-thread-log:empty {
+  display: none;
+}
+
+.collab-thread-entry {
+  margin-bottom: 0.45rem;
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.collab-thread-entry:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.collab-composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.9rem;
+  border-top: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.14);
 }
 
 .terminal-panels { flex: 1; position: relative; min-height: 200px; }
@@ -962,6 +1111,81 @@ textarea { resize: vertical; min-height: 5rem; }
   color: var(--muted);
   border-top: 1px solid var(--border);
   background: var(--sidebar);
+}
+
+/* ── Project tab ─────────────────────────────────────────────────────────── */
+
+.project-path-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.35rem;
+}
+
+.project-path-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.project-help-list {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.project-help-list li {
+  margin-bottom: 0.45rem;
+}
+
+.project-recent-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+/* ── GitHub tab ──────────────────────────────────────────────────────────── */
+
+.github-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.github-action-card h3 {
+  font-size: 1rem;
+  margin-bottom: 0.35rem;
+}
+
+.github-action-card .hint {
+  margin-bottom: 0.65rem;
+  min-height: 2.6em;
+}
+
+.github-action-status {
+  min-height: 1.25rem;
+  margin-top: 0.35rem;
+  margin-bottom: 0;
+}
+
+.github-status-card h3 {
+  font-size: 1rem;
+  margin-bottom: 0.35rem;
+}
+
+.btn-link {
+  border: none;
+  background: none;
+  color: var(--accent-hover);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.btn-link:hover {
+  color: var(--text);
 }
 
 /* ── Ideas ───────────────────────────────────────────────────────────────── */
@@ -1528,6 +1752,13 @@ textarea { resize: vertical; min-height: 5rem; }
 .screenshot-modal-capture-row {
   display: flex;
   gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.screenshot-file-label {
+  cursor: pointer;
+  margin: 0;
 }
 
 .screenshot-desc-label {

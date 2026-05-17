@@ -51,14 +51,16 @@ class PtyWindows:
         """Register a callback that receives raw VT bytes as they arrive."""
         self._output_cb = callback
 
-    async def start(self, cmd: list[str]) -> None:
+    async def start(self, cmd: list[str], cwd: str | None = None) -> None:
         """Spawn the process inside a ConPTY of the configured size."""
         env = build_pty_env(self.cols, self.rows)
-        self._pty = winpty.PtyProcess.spawn(
-            cmd,
-            dimensions=(self.rows, self.cols),
-            env=env,
-        )
+        kwargs: dict = {
+            "dimensions": (self.rows, self.cols),
+            "env": env,
+        }
+        if cwd:
+            kwargs["cwd"] = cwd
+        self._pty = winpty.PtyProcess.spawn(cmd, **kwargs)
         self._running = True
         self._reader_task = asyncio.create_task(self._read_loop())
 

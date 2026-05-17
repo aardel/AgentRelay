@@ -68,6 +68,7 @@ from ssh_hosts import (
 from agent_data import AgentDataStore
 from idea_store import IdeaStore
 from bug_store import BugStore
+from project_store import ProjectStore
 
 SERVICE_TYPE = "_agentrelay._tcp.local."
 INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
@@ -843,6 +844,7 @@ class AgentRelay:
         self.agent_data = AgentDataStore()
         self.idea_store = IdeaStore()
         self.bug_store = BugStore()
+        self.project_store = ProjectStore()
         self.azc: AsyncZeroconf | None = None
         self.browser: AsyncServiceBrowser | None = None
         self.service_info: ServiceInfo | None = None
@@ -1985,8 +1987,12 @@ class AgentRelay:
                                 self._register_agentmemory_close_hook(session)
                                 self._trigger_heartbeat()
                                 created_session = True
+                                spawn_cwd = frame.get("cwd") or None
+                                if not spawn_cwd:
+                                    active_root = self.project_store.active_path()
+                                    spawn_cwd = str(active_root) if active_root else None
                                 try:
-                                    await session.start(argv)
+                                    await session.start(argv, cwd=spawn_cwd)
                                 except Exception as exc:
                                     created_session = False
                                     pty_registry.remove(session.session_id)
@@ -2130,8 +2136,19 @@ class AgentRelay:
             "nearby": self.peers.list(),
             "wait_before_send_seconds": self.cfg.wait_before_send_seconds,
             "agentmemory": await self._agentmemory_status(),
+            "active_project": self._active_project_payload(),
         }
         return web.json_response(setup)
+
+    def _active_project_payload(self) -> dict[str, Any] | None:
+        project = self.project_store.get_active()
+        if not project:
+            return None
+        return {
+            "id": project.get("id"),
+            "name": project.get("name"),
+            "local_path": project.get("local_path"),
+        }
 
     async def handle_api_pending(self, request: web.Request) -> web.Response:
         if not self._auth(request):
@@ -2224,6 +2241,189 @@ class AgentRelay:
         if isinstance(agents_field, list):
             return [str(a).strip() for a in agents_field if str(a).strip()]
         return [a.strip() for a in str(agents_field or "").split(",") if a.strip()]
+
+    def _collaboration_targets(self) -> list[dict[str, Any]]:
+        """Active local and connected peer agent terminals for collaboration."""
+        entries: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for agent_id in list_active_agent_names():
+            key = (self.cfg.node_name, agent_id)
+            seen.add(key)
+            entries.append({
+                "node": self.cfg.node_name,
+                "agent": agent_id,
+                "label": f"{self.cfg.node_name}/{agent_id}",
+                "local": True,
+            })
+
+        for peer in self.peers.list():
+            if not peer.get("connected"):
+                continue
+            node = peer.get("name", "")
+            if not node or node == self.cfg.node_name:
+                continue
+            for agent_id in self._peer_agent_ids(peer.get("active_agents")):
+                key = (node, agent_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append({
+                    "node": node,
+                    "agent": agent_id,
+                    "label": f"{node}/{agent_id}",
+                    "local": False,
+                })
+        return entries
+
+    def _collaboration_prompt(
+        self, message: str, mode: str, participants: list[dict[str, str]],
+        target: dict[str, str],
+    ) -> str:
+        participant_text = ", ".join(
+            f"{p['agent']}@{p['node']}" for p in participants)
+        mode_label = "auto roles" if mode == "roles" else "shared instruction"
+        role_text = ""
+        if mode == "roles":
+            roles = [
+                "implementation lead",
+                "critic/reviewer",
+                "researcher",
+                "synthesizer",
+            ]
+            index = next(
+                (i for i, p in enumerate(participants)
+                 if p["node"] == target["node"] and p["agent"] == target["agent"]),
+                0,
+            )
+            role_text = (
+                f"\nYour assigned collaboration role: {roles[index % len(roles)]}.\n"
+                "Stay in that role, but raise important concerns outside it when needed.\n"
+            )
+        return (
+            "[Collaboration session]\n"
+            f"Mode: {mode_label}\n"
+            f"Participants: {participant_text}\n"
+            f"{role_text}\n"
+            "You are working with the other selected agents through AgentRelay. "
+            "Split the load, challenge assumptions, point out risks, avoid reflexive "
+            "agreement, and converge on a better final product. If you disagree, "
+            "explain why with concrete trade-offs.\n\n"
+            "User request:\n"
+            f"{message}\n"
+        )
+
+    async def handle_api_collaboration_targets(
+        self, request: web.Request,
+    ) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"targets": self._collaboration_targets()})
+
+    async def _deliver_collaboration(
+        self, target: dict[str, str], prompt: str,
+    ) -> dict[str, Any]:
+        node = target["node"]
+        agent = target["agent"]
+        if node == self.cfg.node_name:
+            active = set(list_active_agent_names())
+            if agent not in active:
+                return {"node": node, "agent": agent, "ok": False,
+                        "error": f"agent is not active: {agent}"}
+            adapter = self.cfg.adapters.get(agent)
+            if not adapter:
+                return {"node": node, "agent": agent, "ok": False,
+                        "error": f"unknown local agent: {agent}"}
+            if adapter.mode in INTERACTIVE_MODES:
+                result = await spawn_agent(self.cfg, adapter, prompt)
+            else:
+                talk_cfg = dataclasses.replace(self.cfg, use_tmux=False)
+                result = await spawn_agent(talk_cfg, adapter, prompt)
+            ok = result.get("exit_code", 1) == 0 or result.get("status") in (
+                "sent", "queued", "spawned")
+            return {"node": node, "agent": agent, "ok": ok,
+                    "status": result.get("status"), "stdout": result.get("stdout", "")}
+
+        peer = self.peers.peers.get(node)
+        if not peer:
+            return {"node": node, "agent": agent, "ok": False,
+                    "error": f"peer not found: {node}"}
+        active = set(self._peer_agent_ids(peer.active_agents))
+        if agent not in active:
+            return {"node": node, "agent": agent, "ok": False,
+                    "error": f"agent is not active on peer: {agent}"}
+        url = f"http://{peer.address}:{peer.port}/forward"
+        payload = {
+            "from_node": self.cfg.node_name,
+            "from_agent": "agentrelay-collaboration",
+            "to_agent": agent,
+            "message": prompt,
+        }
+        try:
+            t = aiohttp.ClientTimeout(total=None, sock_connect=5)
+            async with aiohttp.ClientSession(timeout=t) as s:
+                async with s.post(
+                    url, json=payload, headers={"X-Agent-Token": self.cfg.token},
+                ) as r:
+                    data = await r.json()
+            ok = r.status == 200 and data.get("ok", False)
+            return {"node": node, "agent": agent, "ok": ok,
+                    "status": data.get("status"), "error": data.get("error")}
+        except Exception as exc:
+            return {"node": node, "agent": agent, "ok": False, "error": str(exc)}
+
+    async def handle_api_collaboration_send(
+        self, request: web.Request,
+    ) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        message = str(body.get("message") or "").strip()
+        mode = str(body.get("mode") or "shared").strip().lower()
+        raw_targets = body.get("targets") or []
+        if not message:
+            return web.json_response({"error": "message required"}, status=400)
+        if mode not in ("shared", "roles"):
+            return web.json_response(
+                {"error": "mode must be 'shared' or 'roles'"}, status=400)
+
+        active = {
+            (t["node"], t["agent"])
+            for t in self._collaboration_targets()
+        }
+        targets: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in raw_targets:
+            node = str(item.get("node", "")).strip()
+            agent = str(item.get("agent", "")).strip()
+            key = (node, agent)
+            if not node or not agent or key in seen:
+                continue
+            seen.add(key)
+            if key in active:
+                targets.append({"node": node, "agent": agent})
+        if len(targets) < 2:
+            return web.json_response(
+                {"error": "select at least two active agents"}, status=400)
+
+        results = await asyncio.gather(*[
+            self._deliver_collaboration(
+                target, self._collaboration_prompt(message, mode, targets, target))
+            for target in targets
+        ])
+        succeeded = sum(1 for r in results if r.get("ok"))
+        return web.json_response({
+            "ok": succeeded > 0,
+            "mode": mode,
+            "sent_to": len(targets),
+            "succeeded": succeeded,
+            "failed": len(targets) - succeeded,
+            "results": results,
+        })
 
     def _broadcast_agent_entries(self, scope: str) -> list[dict[str, str]]:
         """Build [{node, agent}, ...] for local-only or all connected peers."""
@@ -2380,6 +2580,210 @@ class AgentRelay:
         asyncio.create_task(_shutdown())
         return web.json_response({"ok": True})
 
+    async def _git_run(
+        self, project_root: Path, argv: list[str], timeout: int = 30,
+    ) -> tuple[int, str, str]:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(project_root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return (
+            proc.returncode or 0,
+            stdout.decode("utf-8", errors="replace").strip(),
+            stderr.decode("utf-8", errors="replace").strip(),
+        )
+
+    async def handle_api_projects_list(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        active = self.project_store.get_active()
+        return web.json_response({
+            "projects": self.project_store.list_projects(),
+            "active": active,
+        })
+
+    async def handle_api_projects_open(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        path = str(body.get("path", "")).strip()
+        if not path:
+            return web.json_response({"error": "path required"}, status=400)
+        try:
+            project = self.project_store.set_active_path(path)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "project": project})
+
+    async def handle_api_projects_active(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if request.method == "GET":
+            project = self.project_store.get_active()
+            if not project:
+                return web.json_response({"active": None})
+            payload = dict(project)
+            root = Path(project["local_path"])
+            if root.is_dir():
+                try:
+                    _, branch, _ = await self._git_run(
+                        root, ["git", "branch", "--show-current"], timeout=8,
+                    )
+                    _, status_out, _ = await self._git_run(
+                        root, ["git", "status", "--porcelain"], timeout=8,
+                    )
+                    payload["branch"] = branch or "main"
+                    payload["dirty"] = bool(status_out.strip())
+                except Exception:
+                    pass
+            return web.json_response({"active": payload})
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        raw_id = body.get("id")
+        if raw_id is None or raw_id == "":
+            self.project_store.set_active(None)
+            return web.json_response({"ok": True, "active": None})
+        project_id = str(raw_id).strip()
+        project = self.project_store.set_active(project_id)
+        if not project:
+            return web.json_response({"error": "project not found"}, status=404)
+        return web.json_response({"ok": True, "active": project})
+
+    async def handle_api_projects_pick(self, request: web.Request) -> web.Response:
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+
+        def _dialog() -> str:
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+                chosen = filedialog.askdirectory()
+                root.destroy()
+                return chosen or ""
+            except Exception:
+                return ""
+
+        loop = asyncio.get_running_loop()
+        path = await loop.run_in_executor(None, _dialog)
+        return web.json_response({"path": path})
+
+    async def handle_api_projects_remove(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        project_id = request.match_info.get("project_id", "")
+        if not self.project_store.remove(project_id):
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    async def handle_api_github_status(self, request: web.Request) -> web.Response:
+        """Branch and working-tree summary for the GitHub tab. Localhost-only."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        project_root = Path(__file__).parent
+        try:
+            _, branch, _ = await self._git_run(
+                project_root, ["git", "branch", "--show-current"], timeout=10,
+            )
+            _, status_out, _ = await self._git_run(
+                project_root, ["git", "status", "--porcelain"], timeout=10,
+            )
+            _, log_out, _ = await self._git_run(
+                project_root, ["git", "log", "-1", "--oneline"], timeout=10,
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"ok": False, "message": "Timed out reading git status."})
+        except Exception as exc:
+            return web.json_response({"ok": False, "message": str(exc)})
+
+        dirty = bool(status_out.strip())
+        branch = branch or "main"
+        summary_parts = [f"Branch: {branch}"]
+        if dirty:
+            summary_parts.append("You have unsaved local file changes.")
+        else:
+            summary_parts.append("No uncommitted file changes.")
+        if log_out:
+            summary_parts.append(f"Latest snapshot: {log_out}")
+
+        return web.json_response({
+            "ok": True,
+            "branch": branch,
+            "dirty": dirty,
+            "latest_commit": log_out,
+            "summary": " ".join(summary_parts),
+        })
+
+    async def handle_api_update_push(self, request: web.Request) -> web.Response:
+        """Push commits to GitHub. Localhost-only."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        project_root = Path(__file__).parent
+        try:
+            code, push_out, push_err = await self._git_run(
+                project_root, ["git", "push"], timeout=60,
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"ok": False, "message": "Timed out while sending to GitHub."})
+        except Exception as exc:
+            return web.json_response({"ok": False, "message": f"Could not send to GitHub: {exc}"})
+
+        combined = push_out or push_err
+        if code != 0:
+            hint = combined
+            if "no upstream" in combined.lower() or "set upstream" in combined.lower():
+                hint = "No GitHub branch is linked yet. Set that up once in a terminal, then try again."
+            elif "nothing to commit" in combined.lower():
+                hint = "There is nothing new to send — other computers may already have your latest work."
+            return web.json_response({"ok": False, "message": hint, "detail": combined})
+
+        return web.json_response({
+            "ok": True,
+            "message": "Your saved changes were sent to GitHub.",
+            "detail": combined,
+        })
+
+    async def handle_api_app_restart(self, request: web.Request) -> web.Response:
+        """Schedule a full app restart (GUI + daemon). Localhost-only."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+        project_root = Path(__file__).parent
+        restart_script = project_root / "scripts" / "restart_agentrelay.py"
+        if not restart_script.exists():
+            return web.json_response({"ok": False, "message": "Restart script is missing."})
+
+        kwargs: dict = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(
+            [sys.executable, str(restart_script), "--config", str(self.config_path.resolve())],
+            cwd=str(project_root),
+            **kwargs,
+        )
+
+        async def _shutdown() -> None:
+            await asyncio.sleep(0.5)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        asyncio.create_task(_shutdown())
+        return web.json_response({
+            "ok": True,
+            "message": "Restarting AgentRelay…",
+        })
+
     async def handle_api_update_pull(self, request: web.Request) -> web.Response:
         """Pull latest files from git and run the install script. Localhost-only."""
         if not self._localhost(request):
@@ -2387,22 +2791,8 @@ class AgentRelay:
 
         project_root = Path(__file__).parent
 
-        async def _run_proc(argv: list[str], timeout: int) -> tuple[int, str, str]:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=str(project_root),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            return (
-                proc.returncode or 0,
-                stdout.decode("utf-8", errors="replace").strip(),
-                stderr.decode("utf-8", errors="replace").strip(),
-            )
-
         try:
-            _, pull_out, pull_err = await _run_proc(["git", "pull"], timeout=30)
+            _, pull_out, pull_err = await self._git_run(project_root, ["git", "pull"], timeout=30)
         except asyncio.TimeoutError:
             return web.json_response({"ok": False, "message": "Timed out while getting latest files."})
         except Exception as exc:
@@ -2422,7 +2812,7 @@ class AgentRelay:
 
         if not already_current and install_script.exists():
             try:
-                _, install_out, install_err = await _run_proc(install_argv, timeout=120)
+                _, install_out, install_err = await self._git_run(project_root, install_argv, timeout=120)
                 install_msg = install_out or install_err
             except asyncio.TimeoutError:
                 install_msg = "Install script timed out."
@@ -2449,6 +2839,8 @@ class AgentRelay:
         agent = request.match_info["agent"]
         sessions: list[dict] = []
         from yolo_flags import detect_agent_family
+        from project_store import path_under_project
+
         family = detect_agent_family(agent, [agent])
         if family == "claude":
             sessions_dir = Path.home() / ".claude" / "sessions"
@@ -2466,7 +2858,17 @@ class AgentRelay:
                     except Exception:
                         pass
             sessions.sort(key=lambda s: s["startedAt"], reverse=True)
-        return web.json_response({"agent": agent, "sessions": sessions})
+        active = self.project_store.active_path()
+        if active:
+            sessions = [
+                s for s in sessions
+                if not s.get("cwd") or path_under_project(s["cwd"], active)
+            ]
+        return web.json_response({
+            "agent": agent,
+            "sessions": sessions,
+            "project_path": str(active) if active else None,
+        })
 
     async def handle_api_resume_get(self, request: web.Request) -> web.Response:
         if not self._auth(request):
@@ -3166,9 +3568,23 @@ class AgentRelay:
         app.router.add_post("/api/settings", self.handle_api_settings)
         app.router.add_post("/api/send", self.handle_api_send)
         app.router.add_post("/api/broadcast", self.handle_api_broadcast)
+        app.router.add_get(
+            "/api/collaboration/targets", self.handle_api_collaboration_targets)
+        app.router.add_post(
+            "/api/collaboration/send", self.handle_api_collaboration_send)
         app.router.add_post("/api/coordinate", self.handle_coordinate)
         app.router.add_post("/api/relay/stop", self.handle_api_relay_stop)
+        app.router.add_get("/api/projects", self.handle_api_projects_list)
+        app.router.add_post("/api/projects/open", self.handle_api_projects_open)
+        app.router.add_route("*", "/api/projects/active", self.handle_api_projects_active)
+        app.router.add_post("/api/projects/pick", self.handle_api_projects_pick)
+        app.router.add_delete(
+            "/api/projects/{project_id}", self.handle_api_projects_remove,
+        )
+        app.router.add_get("/api/github/status", self.handle_api_github_status)
         app.router.add_post("/api/update/pull", self.handle_api_update_pull)
+        app.router.add_post("/api/update/push", self.handle_api_update_push)
+        app.router.add_post("/api/app/restart", self.handle_api_app_restart)
         app.router.add_get("/api/terminal/sessions", self.handle_api_terminal_sessions)
         app.router.add_get(
             "/api/terminal/sessions/{session_id}/usage",

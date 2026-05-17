@@ -1,5 +1,6 @@
 """GUI API routes on the aiohttp app."""
 
+import base64
 import sys
 import tempfile
 import unittest
@@ -231,6 +232,72 @@ class GuiApiRoutesTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(resp.status, 400)
+
+    async def test_gui_index_has_screenshot_modal_before_app_js(self) -> None:
+        resp = await self.client.get(
+            "/?token=test-token-12345678901234567890&port=9876"
+        )
+        text = await resp.text()
+        modal_pos = text.find('id="btn-screenshot-capture"')
+        app_js_pos = text.find('src="/gui/app.js"')
+        self.assertGreater(modal_pos, 0)
+        self.assertGreater(app_js_pos, 0)
+        self.assertLess(modal_pos, app_js_pos)
+
+    async def test_github_status_localhost(self) -> None:
+        resp = await self.client.get("/api/github/status")
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertTrue(data.get("ok"))
+        self.assertIn("branch", data)
+
+    async def test_app_restart_localhost(self) -> None:
+        with patch("agentrelay.subprocess.Popen") as popen:
+            resp = await self.client.post("/api/app/restart")
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertTrue(data.get("ok"))
+        popen.assert_called_once()
+
+    async def test_gui_index_has_github_tab(self) -> None:
+        resp = await self.client.get(
+            "/?token=test-token-12345678901234567890&port=9876"
+        )
+        text = await resp.text()
+        self.assertIn('data-view="github"', text)
+        self.assertIn("Get the latest files", text)
+        self.assertIn("Restart app", text)
+
+    async def test_api_projects_open(self) -> None:
+        headers = {"X-Agent-Token": "test-token-12345678901234567890"}
+        resp = await self.client.post(
+            "/api/projects/open",
+            headers=headers,
+            json={"path": self.tmp.name},
+        )
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data["project"]["local_path"], str(Path(self.tmp.name).resolve()))
+
+    async def test_api_screenshot_saves_png(self) -> None:
+        png_1x1 = base64.b64encode(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+            b"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4"
+            b"\x00\x00\x00\x00IEND\xaeB`\x82"
+        ).decode()
+        headers = {"X-Agent-Token": "test-token-12345678901234567890"}
+        resp = await self.client.post(
+            "/api/screenshot",
+            headers=headers,
+            json={"data": f"data:image/png;base64,{png_1x1}"},
+        )
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        path = Path(data["path"])
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.suffix, ".png")
 
 
 if __name__ == "__main__":

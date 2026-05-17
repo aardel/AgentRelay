@@ -15,6 +15,7 @@ import asyncio
 import base64
 import os
 import secrets
+from pathlib import Path
 import sys
 import time
 import uuid
@@ -62,6 +63,7 @@ class PTYSession:
     rows: int = 50
     session_type: str = "agent"
     target: str = ""
+    cwd: str = ""
 
     # Private state
     _pty: Any = field(default=None, init=False, repr=False)
@@ -84,7 +86,7 @@ class PTYSession:
     # Lifecycle                                                            #
     # ------------------------------------------------------------------ #
 
-    async def start(self, cmd: list[str]) -> None:
+    async def start(self, cmd: list[str], cwd: str | os.PathLike[str] | None = None) -> None:
         """Spawn the agent process inside a PTY."""
         from pty_env import resolve_pty_argv
 
@@ -92,7 +94,9 @@ class PTYSession:
         self._pty.on_output(self._handle_output)
         self._write_token = secrets.token_urlsafe(32)
         self._started_at = time.time()
-        await self._pty.start(resolve_pty_argv(cmd))
+        cwd_str = str(Path(cwd).resolve()) if cwd else ""
+        self.cwd = cwd_str
+        await self._pty.start(resolve_pty_argv(cmd), cwd=cwd_str or None)
         asyncio.create_task(self._watch_exit())
 
     async def stop(self) -> None:

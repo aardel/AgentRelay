@@ -23,7 +23,8 @@ Living checklist. Implementation status table: [feature-roadmap.md](feature-road
 - [x] Freedom level when **sending** to remote agent
 - [x] Remote **Open** from Activity for peer machine sessions
 - [x] Launch saved SSH presets in **remote SSH terminal** tabs
-- [x] **In-app updates** — “Get latest files” in Settings (no git jargon)
+- [x] **GitHub tab** — friendly sync actions, refresh UI, restart app
+- [x] **Project tab (MVP)** — open folder, terminal cwd, resume filtered by project path
 - [x] **Terminal usage bar MVP** — per-session parser, API, and UI strip
 - [x] Docs: implementation status, GitHub sync guide (plain language), GUI friendly labels
 

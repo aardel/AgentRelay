@@ -31,6 +31,8 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px"><path d="M8 2l2 4"/><path d="M14 2l-2 4"/><path d="M12 6v4"/><path d="M4 10h16"/><path d="M6 10l-2 8h16l-2-8"/><path d="M8 18v4"/><path d="M16 18v4"/></svg>Bugs
         </button>
         <button type="button" class="nav-item" data-view="skills">Extra commands</button>
+        <button type="button" class="nav-item" data-view="project">Project</button>
+        <button type="button" class="nav-item" data-view="github">GitHub</button>
         <button type="button" class="nav-item" data-view="settings">Settings</button>
       </nav>
       <div class="sidebar-footer">
@@ -274,6 +276,11 @@
             </details>
           </div>
           <p class="terminal-toolbar-hint profile-hint" id="profile-hint-terminals"></p>
+          <div class="terminal-collab-rail" id="terminal-collab-rail" aria-label="Collaboration targets">
+            <span class="terminal-collab-label">Collaboration</span>
+            <div class="terminal-collab-targets" id="terminal-collab-targets"></div>
+            <span class="terminal-collab-empty" id="terminal-collab-empty">Open active agent terminals to collaborate.</span>
+          </div>
           <div class="terminal-tabs" id="terminal-tabs"></div>
           <div id="terminal-panels" class="terminal-panels"></div>
         </div>
@@ -406,11 +413,87 @@
         </article>
       </section>
 
+      <section id="view-project" class="view">
+        <header class="view-header">
+          <h2>Project</h2>
+        </header>
+        <p class="view-header-desc">Open a folder as your working project. Agents and resume sessions use this directory so Claude and other tools stay in the right codebase.</p>
+        <article class="card">
+          <h3>Active project</h3>
+          <p class="hint" id="project-active-summary">No project loaded — agents start in the default folder.</p>
+          <label>Project folder
+            <div class="row project-path-row">
+              <input id="project-path-input" type="text" placeholder="e.g. E:\Programing\MyApp" class="project-path-input">
+              <button type="button" id="btn-project-pick" class="btn ghost small">Browse…</button>
+            </div>
+          </label>
+          <div class="row" style="margin-top:0.65rem">
+            <button type="button" id="btn-project-open" class="btn primary small">Open project</button>
+            <button type="button" id="btn-project-clear" class="btn ghost small">Clear project</button>
+          </div>
+          <p class="hint" id="project-open-status"></p>
+        </article>
+        <article class="card">
+          <h3>What this changes</h3>
+          <ul class="project-help-list hint">
+            <li><strong>Live terminals</strong> — new agent tabs start inside the project folder.</li>
+            <li><strong>Resume session</strong> — only shows past sessions that belong to this project path.</li>
+            <li><strong>Agent notes</strong> — resume text is per agent; project folder scopes where the CLI runs.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>Recent projects</h3>
+          <ul id="project-recent-list" class="nearby-list">
+            <li class="empty">No recent projects yet.</li>
+          </ul>
+        </article>
+      </section>
+
+      <section id="view-github" class="view">
+        <header class="view-header">
+          <h2>GitHub</h2>
+        </header>
+        <p class="view-header-desc">GitHub keeps all your computers on the same AgentRelay build. After someone changes the project, use <strong>Get the latest files</strong> on each machine, then <strong>Restart app</strong> so the new interface and code load.</p>
+        <article class="card github-status-card">
+          <h3>This computer</h3>
+          <p class="hint" id="github-status-text">Checking…</p>
+        </article>
+        <div class="github-actions">
+          <article class="card github-action-card">
+            <h3>Get the latest files</h3>
+            <p class="hint">Downloads the newest AgentRelay files from GitHub onto this computer and runs the installer.</p>
+            <button type="button" id="btn-github-pull" class="btn primary small">Get the latest files</button>
+            <p class="hint github-action-status" id="github-pull-status"></p>
+          </article>
+          <article class="card github-action-card">
+            <h3>Send your saved changes</h3>
+            <p class="hint">Uploads snapshots you already saved on this machine so your other computers can get them. Does not create new snapshots for you.</p>
+            <button type="button" id="btn-github-push" class="btn ghost small">Send to GitHub</button>
+            <p class="hint github-action-status" id="github-push-status"></p>
+          </article>
+          <article class="card github-action-card">
+            <h3>Refresh this window</h3>
+            <p class="hint">Reloads the app interface after getting latest files — use this if buttons or layout look old.</p>
+            <button type="button" id="btn-github-reload-ui" class="btn ghost small">Refresh UI</button>
+          </article>
+          <article class="card github-action-card">
+            <h3>Restart AgentRelay</h3>
+            <p class="hint">Fully restarts the app so new code runs in memory. Do this after getting the latest files.</p>
+            <button type="button" id="btn-github-restart" class="btn ghost small">Restart app</button>
+            <p class="hint github-action-status" id="github-restart-status"></p>
+          </article>
+        </div>
+        <article class="card">
+          <h3>Plain-language guide</h3>
+          <p class="hint">Pull → <strong>Get the latest files</strong> · Push → <strong>Send your saved changes</strong> · Commit → save a snapshot in git. <a href="https://github.com/aardel/AgentRelay/blob/main/docs/feature-roadmap.md#github--keeping-every-machine-on-the-same-version" target="_blank" rel="noopener">Full sync guide</a></p>
+        </article>
+      </section>
+
       <section id="view-settings" class="view">
         <header class="view-header">
           <h2>Settings</h2>
         </header>
-        <p class="view-header-desc">Timing, copy-paste instructions for your agents, and how to stay up to date.</p>
+        <p class="view-header-desc">Timing and copy-paste instructions for your agents.</p>
         <article class="card">
           <label>Seconds to wait before sending (interactive agents)
             <input id="wait-seconds" type="number" min="1" max="120" value="5">
@@ -427,11 +510,8 @@
           </div>
         </article>
         <article class="card">
-          <h3>Keep this computer up to date</h3>
-          <p class="hint">Downloads the newest AgentRelay files and runs the installer. Restart the app after to apply changes.</p>
-          <button type="button" id="btn-get-latest" class="btn primary">Get latest files</button>
-          <p class="hint" id="update-status"></p>
-          <p class="hint" style="margin-top:0.5rem">Manual steps: <a href="https://github.com/aardel/AgentRelay/blob/main/docs/feature-roadmap.md#github--keeping-every-machine-on-the-same-version" target="_blank" rel="noopener">sync guide</a>.</p>
+          <h3>Stay up to date</h3>
+          <p class="hint">GitHub sync and restart live on the <button type="button" class="btn-link" data-view-jump="github">GitHub</button> tab.</p>
         </article>
       </section>
     </main>
@@ -439,15 +519,33 @@
 
   <footer id="footer" class="footer"></footer>
 
-  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
-  <script src="/gui/agent-colors.js"></script>
-  <script src="/gui/terminals.js"></script>
-  <script src="/gui/ideas.js"></script>
-  <script src="/gui/bugs.js"></script>
-  <script src="/gui/app.js"></script>
+  <div id="collab-composer" class="collab-composer" hidden aria-live="polite">
+    <div class="collab-composer-header">
+      <div>
+        <div class="collab-composer-title">Collaboration</div>
+        <div class="collab-composer-targets" id="collab-composer-targets"></div>
+      </div>
+      <button type="button" id="btn-collab-close" class="collab-composer-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="collab-composer-body">
+      <label>Mode
+        <select id="collab-mode">
+          <option value="shared">Shared instruction</option>
+          <option value="roles">Auto roles</option>
+        </select>
+      </label>
+      <label>Message
+        <textarea id="collab-message" rows="4" placeholder="Start the collaboration..."></textarea>
+      </label>
+      <div id="collab-thread-log" class="collab-thread-log"></div>
+    </div>
+    <div class="collab-composer-footer">
+      <span class="hint" id="collab-status"></span>
+      <button type="button" id="btn-collab-send" class="btn primary small">Send round</button>
+    </div>
+  </div>
 
-  <!-- Screenshot modal -->
+  <!-- Screenshot modal (must be in DOM before app.js wires listeners) -->
   <div id="screenshot-modal" class="screenshot-modal" hidden aria-modal="true" role="dialog" aria-label="Screenshot to agent">
     <div class="screenshot-modal-backdrop"></div>
     <div class="screenshot-modal-dialog">
@@ -462,6 +560,10 @@
         <div class="screenshot-modal-capture-row">
           <button type="button" id="btn-screenshot-capture" class="btn ghost small">Capture screen</button>
           <button type="button" id="btn-screenshot-paste" class="btn ghost small">Paste from clipboard</button>
+          <label class="btn ghost small screenshot-file-label">
+            Choose file
+            <input type="file" id="btn-screenshot-file" accept="image/*" hidden>
+          </label>
         </div>
         <label class="screenshot-desc-label">
           Description for the agent
@@ -474,5 +576,13 @@
       </div>
     </div>
   </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <script src="/gui/agent-colors.js"></script>
+  <script src="/gui/terminals.js"></script>
+  <script src="/gui/ideas.js"></script>
+  <script src="/gui/bugs.js"></script>
+  <script src="/gui/app.js"></script>
 </body>
 </html>

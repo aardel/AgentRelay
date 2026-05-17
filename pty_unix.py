@@ -54,18 +54,23 @@ class PtyUnix:
         """Register a callback that receives raw VT bytes as they arrive."""
         self._output_cb = callback
 
-    async def start(self, cmd: list[str]) -> None:
+    async def start(self, cmd: list[str], cwd: str | None = None) -> None:
         """Spawn the process inside a pty of the configured size."""
         master_fd, slave_fd = pty.openpty()
         self._master_fd = master_fd
         self._set_winsize(master_fd, self.cols, self.rows)
 
         env = build_pty_env(self.cols, self.rows)
-        self._proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-            close_fds=True, env=env,
-        )
+        kwargs: dict = {
+            "stdin": slave_fd,
+            "stdout": slave_fd,
+            "stderr": slave_fd,
+            "close_fds": True,
+            "env": env,
+        }
+        if cwd:
+            kwargs["cwd"] = cwd
+        self._proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
         os.close(slave_fd)
         self._running = True
         self._reader_task = asyncio.get_running_loop().create_task(self._read_loop())
