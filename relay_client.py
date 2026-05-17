@@ -834,6 +834,7 @@ def forward_to_peer(
     from_agent: str | None = None,
     task_id: str | None = None,
     reply_to: str | None = None,
+    permission_profile: str | None = None,
 ) -> tuple[bool, str]:
     """Deliver to a visible agent window on a remote peer via /forward."""
     payload = {
@@ -846,6 +847,8 @@ def forward_to_peer(
         payload["task_id"] = task_id
     if reply_to:
         payload["reply_to"] = reply_to
+    if permission_profile:
+        payload["permission_profile"] = permission_profile
 
     async def _post():
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=5)
@@ -884,6 +887,7 @@ def deliver_to_peer(
     agent: str | None = None,
     task_id: str | None = None,
     reply_to: str | None = None,
+    permission_profile: str | None = None,
 ) -> tuple[bool, str]:
     """
     Send to a remote peer using /forward for interactive agents, else /dispatch.
@@ -902,7 +906,8 @@ def deliver_to_peer(
         )
     if _looks_interactive(resolved_agent, mode):
         return forward_to_peer(cfg, addr, port, message, resolved_agent,
-                               task_id=task_id, reply_to=reply_to)
+                               task_id=task_id, reply_to=reply_to,
+                               permission_profile=permission_profile)
     return send_to_peer(cfg, addr, port, message, agent)
 
 

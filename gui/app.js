@@ -51,7 +51,7 @@ function profileFriendly(id) {
 
 function syncProfileSelects() {
   const current = getLaunchProfile();
-  for (const id of ["launch-profile", "launch-profile-terminals"]) {
+  for (const id of ["launch-profile", "launch-profile-terminals", "send-profile"]) {
     const sel = el(id);
     if (sel) sel.value = current;
   }
@@ -74,7 +74,7 @@ async function loadPermissionProfiles() {
   const { ok, data } = await api("/api/profiles");
   if (!ok) return;
   profileCatalog = data.profiles || [];
-  for (const selectId of ["launch-profile", "launch-profile-terminals"]) {
+  for (const selectId of ["launch-profile", "launch-profile-terminals", "send-profile"]) {
     const sel = el(selectId);
     if (!sel) continue;
     sel.innerHTML = "";
@@ -768,6 +768,7 @@ el("btn-send").addEventListener("click", async () => {
       local: target.local,
       address: target.address,
       port: target.port,
+      permission_profile: el("send-profile")?.value || getLaunchProfile(),
     }),
   });
   el("send-status").textContent = ok
@@ -941,7 +942,7 @@ el("btn-relay-stop").addEventListener("click", async () => {
   setRelay(false);
 });
 
-for (const id of ["launch-profile", "launch-profile-terminals"]) {
+for (const id of ["launch-profile", "launch-profile-terminals", "send-profile"]) {
   el(id)?.addEventListener("change", (e) => setLaunchProfile(e.target.value));
 }
 loadPermissionProfiles();
@@ -1152,7 +1153,7 @@ function renderTasks(tasks) {
       ? escHtml(t.message.slice(0, 55)) + "…"
       : escHtml(t.message || "");
     const sessionCell = t.session_id
-      ? `<a href="#" class="task-attach" data-session="${escHtml(t.session_id)}" data-agent="${escHtml(t.target_agent)}">Open</a>`
+      ? `<a href="#" class="task-attach" data-session="${escHtml(t.session_id)}" data-agent="${escHtml(t.target_agent)}" data-node="${escHtml(t.target_node)}">Open</a>`
       : "—";
     const freedom = profileFriendly(t.permission_profile);
     return `<tr>
@@ -1170,9 +1171,23 @@ function renderTasks(tasks) {
   tbody.querySelectorAll(".task-attach").forEach((a) => {
     a.addEventListener("click", (e) => {
       e.preventDefault();
+      const targetNode = a.dataset.node;
+      const localNode = el("node-name").value;
+      let host = "127.0.0.1";
+      let port = API_PORT;
+      if (targetNode && targetNode !== localNode) {
+        const peer = sendTargets.find((t) => t.name === targetNode);
+        if (!peer) {
+          setFooter(`Peer ${targetNode} is not currently connected`);
+          return;
+        }
+        host = peer.address;
+        port = peer.port;
+      }
       showView("terminals");
       window.AgentRelayTerminals?.openTerminal(
-        a.dataset.agent, API_PORT, AUTH_TOKEN, { sessionId: a.dataset.session, reuse: false });
+        a.dataset.agent, port, AUTH_TOKEN,
+        { sessionId: a.dataset.session, reuse: false, host });
     });
   });
 }

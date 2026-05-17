@@ -72,8 +72,8 @@
     return true;
   }
 
-  function wsUrl(port, token) {
-    return `ws://127.0.0.1:${port}/terminal?token=${encodeURIComponent(token)}`;
+  function wsUrl(host, port, token) {
+    return `ws://${host}:${port}/terminal?token=${encodeURIComponent(token)}`;
   }
 
   const XTERM_THEME = {
@@ -139,7 +139,7 @@
    * @param {string} agent
    * @param {number} port
    * @param {string} token
-   * @param {{ sessionId?: string, injectSnippet?: boolean, reuse?: boolean, yolo?: boolean, profile?: string }} options
+   * @param {{ sessionId?: string, injectSnippet?: boolean, reuse?: boolean, yolo?: boolean, profile?: string, host?: string, sessionType?: string, sshNode?: string, label?: string, onOpen?: function }} options
    */
   // Shared right-click context menu for all terminal panels
   let ctxMenu = null;
@@ -255,6 +255,7 @@
     const reuse = options.reuse === true;
     const yolo = Boolean(options.yolo);
     const profile = options.profile || null;
+    const host = options.host || "127.0.0.1";
 
     if (!global.Terminal || !global.FitAddon) {
       throw new Error("xterm.js not loaded");
@@ -323,7 +324,7 @@
     activateTab(id);
     fitAddon.fit();
 
-    const ws = new WebSocket(wsUrl(port, token));
+    const ws = new WebSocket(wsUrl(host, port, token));
     tabs.get(id).ws = ws;
 
     ws.onopen = () => {

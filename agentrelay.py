@@ -1123,6 +1123,7 @@ class AgentRelay:
         from_node = body.get("from_node", "unknown")
         from_agent = body.get("from_agent", "")
         requested_agent = body.get("to_agent") or self.cfg.default_agent
+        permission_profile = (body.get("permission_profile") or "safe").strip()
         active = list_active_agent_names()
         to_agent = self.cfg.resolve_adapter_name(
             requested_agent, prefer_interactive=True, active_agents=active or None)
@@ -1185,6 +1186,7 @@ class AgentRelay:
             target_agent=to_agent,
             message=message,
             status="received",
+            permission_profile=permission_profile,
             originator_task_id=originator_task_id,
             reply_to=reply_to,
         )
@@ -1851,10 +1853,14 @@ class AgentRelay:
                                 {"type": "error", "session_id": session.session_id,
                                  "code": "unauthorized",
                                  "message": "invalid write_token"}))
-                        except Exception as exc:
+                        except EOFError as exc:
                             await ws.send_str(json.dumps(
                                 {"type": "error", "session_id": session.session_id,
                                  "code": "pty_error", "message": str(exc)}))
+                        except Exception as exc:
+                            log.warning(
+                                "terminal input failed for %s: %s",
+                                session.session_id, exc)
 
                     elif ftype == "resize":
                         if not session:
@@ -2136,6 +2142,7 @@ class AgentRelay:
         local = bool(body.get("local"))
         addr = (body.get("address") or "127.0.0.1").strip()
         port = int(body.get("port") or self.cfg.port)
+        permission_profile = (body.get("permission_profile") or "safe").strip()
         if not agent or not message:
             return web.json_response({"error": "agent and message required"}, status=400)
         if local:
@@ -2153,7 +2160,8 @@ class AgentRelay:
 
         loop = asyncio.get_running_loop()
         ok, msg = await loop.run_in_executor(
-            None, deliver_to_peer, self.cfg, addr, port, message, agent)
+            None, deliver_to_peer, self.cfg, addr, port, message, agent,
+            None, None, permission_profile)
         return web.json_response({"ok": ok, "message": msg})
 
     async def handle_api_inbox(self, request: web.Request) -> web.Response:
