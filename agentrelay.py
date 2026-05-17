@@ -2381,6 +2381,22 @@ class AgentRelay:
             return web.json_response({"error": "unauthorized"}, status=401)
         return web.json_response({"sessions": pty_registry.list()})
 
+    async def handle_api_terminal_session_usage(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        session_id = request.match_info["session_id"]
+        session = pty_registry.get(session_id)
+        if not session:
+            return web.json_response({"error": "session not found"}, status=404)
+        usage = session.usage.snapshot()
+        usage.update({
+            "session_id": session.session_id,
+            "session_type": session.session_type,
+            "target": session.target,
+            "alive": session.alive,
+        })
+        return web.json_response(usage)
+
     async def handle_api_profiles(self, request: web.Request) -> web.Response:
         """GET /api/profiles — return permission profile definitions. Localhost-only."""
         if not self._localhost(request):
@@ -2619,6 +2635,10 @@ class AgentRelay:
         app.router.add_post("/api/relay/stop", self.handle_api_relay_stop)
         app.router.add_post("/api/update/pull", self.handle_api_update_pull)
         app.router.add_get("/api/terminal/sessions", self.handle_api_terminal_sessions)
+        app.router.add_get(
+            "/api/terminal/sessions/{session_id}/usage",
+            self.handle_api_terminal_session_usage,
+        )
         app.router.add_get("/api/profiles", self.handle_api_profiles)
         app.router.add_get("/api/skills", self.handle_api_skills)
         app.router.add_post("/api/skills/install", self.handle_api_skills_install)

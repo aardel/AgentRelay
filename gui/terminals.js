@@ -76,6 +76,10 @@
     return `ws://${host}:${port}/terminal?token=${encodeURIComponent(token)}`;
   }
 
+  function httpUrl(host, port, path, token) {
+    return `http://${host}:${port}${path}?token=${encodeURIComponent(token)}`;
+  }
+
   const XTERM_THEME = {
     background: "#1e1e1e",
     foreground: "#d4d4d4",
@@ -127,6 +131,7 @@
     if (tab.ws && tab.ws.readyState === WebSocket.OPEN) {
       tab.ws.close();
     }
+    if (tab.usageTimer) window.clearInterval(tab.usageTimer);
     tab.term.dispose();
     tab.wrap.remove();
     tab.panel.remove();
@@ -299,6 +304,13 @@
     const panel = document.createElement("div");
     panel.className = "terminal-panel";
     panel.id = `panel-${id}`;
+    const viewport = document.createElement("div");
+    viewport.className = "terminal-viewport";
+    const usageStrip = document.createElement("div");
+    usageStrip.className = "terminal-usage";
+    usageStrip.textContent = sessionType === "agent" ? "Usage unavailable" : "SSH session";
+    panel.appendChild(viewport);
+    panel.appendChild(usageStrip);
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 13,
@@ -313,9 +325,9 @@
     };
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
-    term.open(panel);
+    term.open(viewport);
 
-    panel.addEventListener("contextmenu", (e) => {
+    viewport.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       if (!term.getSelection()) selectWordAtMouse(term, e.clientX, e.clientY);
       showContextMenu(e.clientX, e.clientY);
@@ -330,6 +342,11 @@
       agent,
       sessionType,
       sshNode,
+      usageStrip,
+      usageTimer: null,
+      host,
+      port,
+      token,
       sessionId: null,
     });
     tabsEl().appendChild(wrap);
@@ -384,6 +401,7 @@
           term.clear();
           if (frame.scrollback) writeVt(frame.scrollback);
           fitAddon.fit();
+          startUsagePolling(tab);
           if (typeof options.onOpen === "function") options.onOpen(frame);
           if (tab.sessionType === "agent") flushPendingForAgent(tab.agent);
           break;
@@ -438,6 +456,60 @@
     });
 
     return id;
+  }
+
+  function startUsagePolling(tab) {
+    if (!tab || tab.sessionType !== "agent" || !tab.sessionId || tab.usageTimer) return;
+    const refresh = () => refreshUsage(tab);
+    refresh();
+    tab.usageTimer = window.setInterval(refresh, 5000);
+  }
+
+  function refreshUsage(tab) {
+    if (!tab || !tab.sessionId || !tab.usageStrip) return;
+    const path = `/api/terminal/sessions/${encodeURIComponent(tab.sessionId)}/usage`;
+    fetch(httpUrl(tab.host || "127.0.0.1", tab.port, path, tab.token))
+      .then((r) => r.ok ? r.json() : null)
+      .then((usage) => {
+        if (!usage) return;
+        renderUsage(tab.usageStrip, usage);
+      })
+      .catch(() => {});
+  }
+
+  function formatTokens(value, approx) {
+    if (value === null || value === undefined) return null;
+    if (value >= 1_000_000) return `${approx ? "~" : ""}${(value / 1_000_000).toFixed(1)}m`;
+    if (value >= 1_000) return `${approx ? "~" : ""}${Math.round(value / 1_000)}k`;
+    return `${approx ? "~" : ""}${value}`;
+  }
+
+  function formatEta(seconds) {
+    if (seconds === null || seconds === undefined) return null;
+    const minutes = Math.max(1, Math.round(seconds / 60));
+    return `~${minutes} min`;
+  }
+
+  function renderUsage(el, usage) {
+    if (usage.source === "none" || usage.used === null || usage.used === undefined) {
+      el.textContent = "Usage unavailable";
+      el.classList.remove("warn");
+      return;
+    }
+    const parts = [`Used ${formatTokens(usage.used)}`];
+    const left = formatTokens(usage.remaining, true);
+    const eta = formatEta(usage.eta_seconds);
+    if (left) parts.push(`Left ${left}`);
+    if (eta) parts.push(eta);
+    if (usage.tokens_per_minute) parts.push(`${Math.round(usage.tokens_per_minute)}/min`);
+    el.textContent = parts.join(" · ");
+    const low = (
+      usage.remaining !== null
+      && usage.remaining !== undefined
+      && usage.limit
+      && usage.remaining / usage.limit < 0.1
+    );
+    el.classList.toggle("warn", Boolean(low));
   }
 
   function openSshTerminal(nodeName, port, token, options) {

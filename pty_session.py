@@ -21,6 +21,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from terminal_usage import TerminalUsage
+
 # ---------------------------------------------------------------------------
 # Platform backend selection
 # ---------------------------------------------------------------------------
@@ -68,11 +70,15 @@ class PTYSession:
     _scrollback: bytearray = field(default_factory=bytearray, init=False, repr=False)
     _started_at: float = field(default=0.0, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    usage: TerminalUsage = field(init=False, repr=False)
 
     # Registered close callback (called when the process exits)
     _on_close: Callable[[str, str], None] | None = field(
         default=None, init=False, repr=False
     )
+
+    def __post_init__(self) -> None:
+        self.usage = TerminalUsage(self.agent_name)
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -188,6 +194,8 @@ class PTYSession:
             del self._scrollback[:trim]
 
         # Broadcast to all subscribers (fire-and-forget from sync context)
+        if self.session_type == "agent":
+            self.usage.observe_output(data)
         msg = {
             "type": "data",
             "session_id": self.session_id,

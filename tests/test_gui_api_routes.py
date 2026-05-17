@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from agentrelay import AgentRelay, Config
 from agent_data import AgentDataStore
+from pty_session import PTYSession, pty_registry
 
 
 def _minimal_cfg() -> Config:
@@ -42,6 +43,7 @@ class GuiApiRoutesTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.client.close()
+        pty_registry._sessions.clear()
         self.tmp.cleanup()
 
     async def test_gui_index_served(self) -> None:
@@ -156,6 +158,32 @@ class GuiApiRoutesTests(unittest.IsolatedAsyncioTestCase):
             json={"memory": ["bad"]},
         )
         self.assertEqual(resp.status, 400)
+
+    async def test_terminal_usage_route(self) -> None:
+        headers = {"X-Agent-Token": "test-token-12345678901234567890"}
+        session = PTYSession(agent_name="claude", node="testnode")
+        session.usage.observe_text("tokens used: 12k context 200k")
+        pty_registry.register(session)
+
+        resp = await self.client.get(
+            f"/api/terminal/sessions/{session.session_id}/usage",
+            headers=headers,
+        )
+
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["session_id"], session.session_id)
+        self.assertEqual(data["used"], 12000)
+        self.assertEqual(data["limit"], 200000)
+        self.assertEqual(data["remaining"], 188000)
+
+    async def test_terminal_usage_route_missing_session(self) -> None:
+        headers = {"X-Agent-Token": "test-token-12345678901234567890"}
+        resp = await self.client.get(
+            "/api/terminal/sessions/missing/usage",
+            headers=headers,
+        )
+        self.assertEqual(resp.status, 404)
 
 
 if __name__ == "__main__":

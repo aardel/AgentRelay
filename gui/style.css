@@ -333,11 +333,34 @@ textarea { resize: vertical; min-height: 5rem; }
   inset: 0;
   display: none;
   padding: 0;
+  flex-direction: column;
 }
 
-.terminal-panel.active { display: block; }
+.terminal-panel.active { display: flex; }
+
+.terminal-viewport {
+  flex: 1;
+  min-height: 0;
+}
 
 .terminal-panel .xterm { height: 100%; padding: 4px; }
+
+.terminal-usage {
+  flex: 0 0 auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  background: rgba(10, 13, 18, 0.92);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  padding: 0.35rem 0.55rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-usage.warn {
+  color: #fbbf24;
+}
 
 .broadcast-card {
   border-color: #6e40c9;
