@@ -114,6 +114,11 @@ class GuiApiRoutesTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["requested_agent"], "gemini")
         self.assertEqual(data["resolved_agent"], "gemini-interactive")
+        self.assertEqual(data["byte_count"], len("hello".encode("utf-8")))
+        self.assertEqual(
+            data["forwarded_byte_count"],
+            len("[Forwarded from codex on WINPC]\n\nhello".encode("utf-8")),
+        )
         self.assertEqual(spawned.await_args.args[1].name, "gemini-interactive")
 
     async def test_resume_and_memory_routes(self) -> None:

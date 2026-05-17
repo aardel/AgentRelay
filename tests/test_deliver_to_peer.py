@@ -159,6 +159,16 @@ class DeliverToPeerTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("no window", msg)
 
+    def test_forward_to_peer_rejects_byte_count_mismatch(self):
+        cfg = _cfg()
+        with patch("relay_client._run", side_effect=_mock_run_returns(
+            (200, {"ok": True, "status": "sent", "forwarded_byte_count": 2}))):
+            ok, msg = forward_to_peer(
+                cfg, "192.168.1.186", 9876, "hello", "codex-interactive")
+
+        self.assertFalse(ok)
+        self.assertIn("Truncated", msg)
+
     def test_send_to_peer_posts_dispatch_payload(self):
         cfg = _cfg()
 

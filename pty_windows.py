@@ -21,6 +21,25 @@ import winpty  # pywinpty
 from pty_env import build_pty_env
 
 
+PTY_WRITE_CHUNK_BYTES = 4096
+PTY_WRITE_CHUNK_DELAY_SECONDS = 0.005
+
+
+def _iter_utf8_text_chunks(text: str, max_bytes: int = PTY_WRITE_CHUNK_BYTES):
+    chunk: list[str] = []
+    chunk_bytes = 0
+    for char in text:
+        char_bytes = len(char.encode("utf-8"))
+        if chunk and chunk_bytes + char_bytes > max_bytes:
+            yield "".join(chunk), chunk_bytes
+            chunk = []
+            chunk_bytes = 0
+        chunk.append(char)
+        chunk_bytes += char_bytes
+    if chunk:
+        yield "".join(chunk), chunk_bytes
+
+
 class PtyWindows:
     """
     Thin async wrapper around a winpty.PtyProcess.
@@ -57,12 +76,23 @@ class PtyWindows:
         self._running = True
         self._reader_task = asyncio.create_task(self._read_loop())
 
-    async def write(self, data: str) -> None:
-        """Send keystrokes/text to the PTY process."""
-        if self._pty and self._running:
-            await asyncio.get_event_loop().run_in_executor(
-                None, self._pty.write, data
-            )
+    async def write(self, data: str) -> int:
+        """Send keystrokes/text to the PTY process, returning UTF-8 bytes written."""
+        if not self._pty or not self._running:
+            return 0
+
+        total = 0
+        expected = len(data.encode("utf-8"))
+        loop = asyncio.get_event_loop()
+        for chunk, chunk_bytes in _iter_utf8_text_chunks(data):
+            result = await loop.run_in_executor(None, self._pty.write, chunk)
+            if isinstance(result, int) and result < len(chunk):
+                raise OSError(
+                    f"ConPTY write accepted {result} of {len(chunk)} characters")
+            total += chunk_bytes
+            if total < expected:
+                await asyncio.sleep(PTY_WRITE_CHUNK_DELAY_SECONDS)
+        return total
 
     async def resize(self, cols: int, rows: int) -> None:
         """Resize the ConPTY window."""

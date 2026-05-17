@@ -24,6 +24,10 @@ import pty  # stdlib
 from pty_env import build_pty_env
 
 
+PTY_WRITE_CHUNK_BYTES = 4096
+PTY_WRITE_CHUNK_DELAY_SECONDS = 0.005
+
+
 class PtyUnix:
     """
     Thin async wrapper around a stdlib pty pair.
@@ -66,11 +70,27 @@ class PtyUnix:
         self._running = True
         self._reader_task = asyncio.get_running_loop().create_task(self._read_loop())
 
-    async def write(self, data: str) -> None:
-        """Send keystrokes/text to the PTY process."""
-        if self._master_fd is not None and self._running:
-            raw = data.encode("utf-8") if isinstance(data, str) else data
-            await asyncio.get_running_loop().run_in_executor(None, os.write, self._master_fd, raw)
+    async def write(self, data: str) -> int:
+        """Send keystrokes/text to the PTY process, returning bytes written."""
+        if self._master_fd is None or not self._running:
+            return 0
+
+        raw = data.encode("utf-8") if isinstance(data, str) else data
+        total = 0
+        loop = asyncio.get_running_loop()
+        for start in range(0, len(raw), PTY_WRITE_CHUNK_BYTES):
+            chunk = raw[start:start + PTY_WRITE_CHUNK_BYTES]
+            view = memoryview(chunk)
+            while view:
+                written = await loop.run_in_executor(
+                    None, os.write, self._master_fd, view)
+                if written <= 0:
+                    raise OSError("PTY write returned 0 bytes")
+                total += written
+                view = view[written:]
+            if start + PTY_WRITE_CHUNK_BYTES < len(raw):
+                await asyncio.sleep(PTY_WRITE_CHUNK_DELAY_SECONDS)
+        return total
 
     async def resize(self, cols: int, rows: int) -> None:
         """Resize the PTY window."""
