@@ -582,14 +582,17 @@ def interactive_launch_argv(
     adapter,
     yolo: bool = False,
     profile: str | None = None,
+    resume_session_id: str | None = None,
 ) -> list[str]:
     """Argv for an interactive PTY session (no {prompt} placeholder).
 
     Pass *profile* ("safe" | "project_write" | "full_auto") for explicit
     control. *yolo=True* is kept for backward compatibility and maps to
-    "full_auto".
+    "full_auto". *resume_session_id* appends --resume <id> for agents that
+    support it (currently claude family).
     """
     from permission_profiles import apply_profile_flags, profile_for_yolo
+    from yolo_flags import detect_agent_family
 
     resolved = profile if profile else profile_for_yolo(yolo)
 
@@ -612,6 +615,8 @@ def interactive_launch_argv(
                 continue
             cleaned.append(p)
         argv = cleaned if cleaned else [adapter_id]
+    if resume_session_id and detect_agent_family(adapter_id, argv) == "claude":
+        argv = [argv[0], "--resume", resume_session_id, *argv[1:]]
     return apply_profile_flags(argv, adapter_id, resolved)
 
 

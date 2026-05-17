@@ -1878,8 +1878,10 @@ class AgentRelay:
 
                                 yolo = bool(frame.get("yolo", False))
                                 profile = frame.get("profile")
+                                resume_session_id = frame.get("resume_session_id") or None
                                 argv = interactive_launch_argv(
-                                    agent, adapter, yolo=yolo, profile=profile)
+                                    agent, adapter, yolo=yolo, profile=profile,
+                                    resume_session_id=resume_session_id)
                                 path_err = validate_launch_argv(argv)
                                 if path_err:
                                     await ws.send_str(json.dumps(
@@ -2335,6 +2337,32 @@ class AgentRelay:
             "install": install_msg,
         })
 
+    async def handle_api_sessions(self, request: web.Request) -> web.Response:
+        """GET /api/sessions/{agent} — list resumable sessions for an agent CLI."""
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        agent = request.match_info["agent"]
+        sessions: list[dict] = []
+        from yolo_flags import detect_agent_family
+        family = detect_agent_family(agent, [agent])
+        if family == "claude":
+            sessions_dir = Path.home() / ".claude" / "sessions"
+            if sessions_dir.is_dir():
+                for f in sessions_dir.glob("*.json"):
+                    try:
+                        data = json.loads(f.read_text(encoding="utf-8"))
+                        sessions.append({
+                            "sessionId": data.get("sessionId", ""),
+                            "cwd": data.get("cwd", ""),
+                            "startedAt": data.get("startedAt", 0),
+                            "procStart": data.get("procStart", ""),
+                            "status": data.get("status", ""),
+                        })
+                    except Exception:
+                        pass
+            sessions.sort(key=lambda s: s["startedAt"], reverse=True)
+        return web.json_response({"agent": agent, "sessions": sessions})
+
     async def handle_api_resume_get(self, request: web.Request) -> web.Response:
         if not self._auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -2649,6 +2677,7 @@ class AgentRelay:
         app.router.add_get("/api/tasks/events", self.handle_task_events)
         app.router.add_get("/api/tasks/{id}", self.handle_task_get)
         app.router.add_post("/api/tasks/{id}/status", self.handle_task_status)
+        app.router.add_get("/api/sessions/{agent}", self.handle_api_sessions)
         app.router.add_get("/api/agents/{agent}/resume", self.handle_api_resume_get)
         app.router.add_post("/api/agents/{agent}/resume", self.handle_api_resume_save)
         app.router.add_get("/api/agents/{agent}/memory", self.handle_api_memory_get)

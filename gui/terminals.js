@@ -11,6 +11,10 @@
   /** @type {{ agent: string, prompt: string, waitSeconds: number }[]} */
   const pendingDeliveries = [];
 
+  // Multi-pane layout state
+  let currentLayout = "1";
+  const gridPanelIds = []; // tab IDs visible in grid, in display order
+
   function sendInput(tab, text) {
     if (!tab || !tab.writeToken || !tab.ws || tab.ws.readyState !== WebSocket.OPEN) {
       return false;
@@ -116,13 +120,66 @@
   }
 
   function activateTab(id) {
+    if (currentLayout !== "1") {
+      // Grid mode: make this pane focused; rotate it to front of gridPanelIds
+      const maxPanes = currentLayout === "4" ? 4 : 2;
+      const idx = gridPanelIds.indexOf(id);
+      if (idx !== -1) gridPanelIds.splice(idx, 1);
+      gridPanelIds.unshift(id);
+      // Fill remaining slots with existing tabs (in creation order)
+      [...tabs.keys()].forEach(k => {
+        if (!gridPanelIds.includes(k) && gridPanelIds.length < maxPanes) gridPanelIds.push(k);
+      });
+      tabs.forEach((tab, key) => {
+        const pos = gridPanelIds.indexOf(key);
+        const visible = pos !== -1 && pos < maxPanes;
+        tab.panel.style.order = visible ? pos : 99;
+        tab.panel.classList.toggle("grid-visible", visible);
+        tab.panel.classList.toggle("grid-focused", key === id);
+        tab.wrap.classList.toggle("active", key === id);
+        if (visible) setTimeout(() => tab.fitAddon && tab.fitAddon.fit(), 50);
+      });
+      return;
+    }
+    // Single-pane mode
     tabs.forEach((tab, key) => {
       tab.wrap.classList.toggle("active", key === id);
       tab.panel.classList.toggle("active", key === id);
-      if (key === id && tab.fitAddon) {
-        setTimeout(() => tab.fitAddon.fit(), 50);
-      }
+      if (key === id && tab.fitAddon) setTimeout(() => tab.fitAddon.fit(), 50);
     });
+  }
+
+  function setLayout(layout) {
+    currentLayout = layout;
+    const panels = panelsEl();
+    panels.className = "terminal-panels" + (layout !== "1" ? " layout-" + layout : "");
+    document.querySelectorAll(".terminal-layout-btn").forEach(b =>
+      b.classList.toggle("active", b.dataset.layout === layout));
+
+    if (layout === "1") {
+      gridPanelIds.length = 0;
+      tabs.forEach(tab => {
+        tab.panel.classList.remove("grid-visible", "grid-focused");
+        tab.panel.style.order = "";
+      });
+      const ids = [...tabs.keys()];
+      if (ids.length) activateTab(ids[ids.length - 1]);
+    } else {
+      // Seed grid with up to N most recently opened tabs
+      const maxPanes = layout === "4" ? 4 : 2;
+      gridPanelIds.length = 0;
+      [...tabs.keys()].slice(-maxPanes).reverse().forEach(id => gridPanelIds.push(id));
+      tabs.forEach((tab, id) => {
+        const pos = gridPanelIds.indexOf(id);
+        const visible = pos !== -1;
+        tab.panel.classList.remove("active");
+        tab.panel.style.order = visible ? pos : 99;
+        tab.panel.classList.toggle("grid-visible", visible);
+        tab.panel.classList.toggle("grid-focused", pos === 0);
+        tab.wrap.classList.toggle("active", pos === 0);
+        if (visible) setTimeout(() => tab.fitAddon && tab.fitAddon.fit(), 50);
+      });
+    }
   }
 
   function closeTab(id) {
@@ -136,6 +193,8 @@
     tab.wrap.remove();
     tab.panel.remove();
     tabs.delete(id);
+    const gi = gridPanelIds.indexOf(id);
+    if (gi !== -1) gridPanelIds.splice(gi, 1);
     const remaining = [...tabs.keys()];
     if (remaining.length) activateTab(remaining[remaining.length - 1]);
   }
@@ -263,6 +322,7 @@
     const reuse = options.reuse === true;
     const yolo = Boolean(options.yolo);
     const profile = options.profile || null;
+    const resumeSessionId = options.resumeSessionId || null;
     const host = options.host || "127.0.0.1";
 
     if (!global.Terminal || !global.FitAddon) {
@@ -381,6 +441,7 @@
             reuse,
             yolo,
             profile,
+            resume_session_id: resumeSessionId,
           };
       ws.send(JSON.stringify(msg));
     };
@@ -526,33 +587,36 @@
     });
   }
 
+  function isFocusedPanel(tab) {
+    return tab.panel.classList.contains("active") || tab.panel.classList.contains("grid-focused");
+  }
+
   function getActiveSelection() {
     let selection = "";
     tabs.forEach((tab) => {
-      if (tab.panel.classList.contains("active")) {
-        selection = tab.term.getSelection();
-      }
+      if (isFocusedPanel(tab)) selection = tab.term.getSelection();
     });
     return selection;
   }
 
   function clearActiveTerminal() {
     tabs.forEach((tab) => {
-      if (tab.panel.classList.contains("active")) {
-        tab.term.clear();
-      }
+      if (isFocusedPanel(tab)) tab.term.clear();
     });
   }
 
   function sendToActiveTerminal(text) {
     let sent = false;
     tabs.forEach((tab) => {
-      if (tab.panel.classList.contains("active")) {
-        sent = sendInput(tab, text) || sent;
-      }
+      if (isFocusedPanel(tab)) sent = sendInput(tab, text) || sent;
     });
     return sent;
   }
+
+  // Wire layout buttons
+  document.querySelectorAll(".terminal-layout-btn").forEach(btn => {
+    btn.addEventListener("click", () => setLayout(btn.dataset.layout));
+  });
 
   global.AgentRelayTerminals = {
     openTerminal,
@@ -562,5 +626,6 @@
     getActiveSelection,
     clearActiveTerminal,
     sendToActiveTerminal,
+    setLayout,
   };
 })(window);
