@@ -119,6 +119,7 @@ Copy-Item -LiteralPath (Join-Path $sourceDir "gui_paths.py") -Destination (Join-
 Copy-Item -LiteralPath (Join-Path $sourceDir "instance_lock.py") -Destination (Join-Path $installRoot "instance_lock.py") -Force
 Copy-Item -LiteralPath (Join-Path $sourceDir "yolo_flags.py") -Destination (Join-Path $installRoot "yolo_flags.py") -Force
 Copy-Item -LiteralPath (Join-Path $sourceDir "pty_session.py") -Destination (Join-Path $installRoot "pty_session.py") -Force
+Copy-Item -LiteralPath (Join-Path $sourceDir "agentmemory_bridge.py") -Destination (Join-Path $installRoot "agentmemory_bridge.py") -Force
 Copy-Item -LiteralPath (Join-Path $sourceDir "pty_unix.py") -Destination (Join-Path $installRoot "pty_unix.py") -Force
 if (Test-Path -LiteralPath (Join-Path $sourceDir "pty_windows.py")) {
     Copy-Item -LiteralPath (Join-Path $sourceDir "pty_windows.py") -Destination (Join-Path $installRoot "pty_windows.py") -Force

@@ -435,6 +435,7 @@ def build_agent_snippet(
     nearby: list[dict[str, Any]] | None = None,
     resume: str | None = None,
     memory: dict[str, Any] | None = None,
+    agentmemory_context: str | None = None,
 ) -> str:
     if nearby is None:
         try:
@@ -443,6 +444,9 @@ def build_agent_snippet(
             nearby = []
 
     lines: list[str] = []
+
+    if agentmemory_context:
+        lines.append(agentmemory_context.rstrip() + "\n")
 
     if resume or memory:
         lines.append("## Resumed context\n")

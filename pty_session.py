@@ -142,6 +142,25 @@ class PTYSession:
         """Return the write token. Call only from the session owner."""
         return self._write_token
 
+    def chain_on_close(self, callback: Callable[[str, str], None]) -> None:
+        """Register an additional close callback without replacing the existing one."""
+        prev = self._on_close
+
+        def chained(session_id: str, reason: str) -> None:
+            if prev:
+                prev(session_id, reason)
+            callback(session_id, reason)
+
+        self._on_close = chained
+
+    def scrollback_text(self, *, max_bytes: int = 32_768) -> bytes:
+        """Recent PTY output for session summaries."""
+        if not self._scrollback:
+            return b""
+        if len(self._scrollback) <= max_bytes:
+            return bytes(self._scrollback)
+        return bytes(self._scrollback[-max_bytes:])
+
     # ------------------------------------------------------------------ #
     # Subscribers                                                          #
     # ------------------------------------------------------------------ #

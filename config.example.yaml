@@ -12,6 +12,15 @@ relay:
 
 trusted_peers: []
 
+# Optional: semantic memory sidecar (https://github.com/rohitg00/agentmemory)
+# agentmemory:
+#   enabled: false
+#   url: http://127.0.0.1:3111
+#   project: agentrelay
+#   token_budget: 1500
+#   inject_on_launch: true
+#   observe_on_close: true
+
 adapters:
   claude:
     label: Claude

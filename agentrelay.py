@@ -285,6 +285,7 @@ class Config:
     use_tmux: bool
     wait_before_send_seconds: int
     trusted_peers: list[str]
+    agentmemory: Any = None  # AgentmemoryConfig; optional sidecar bridge
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -292,6 +293,8 @@ class Config:
 
     @classmethod
     def load_dict(cls, data: dict[str, Any]) -> "Config":
+        from agentmemory_bridge import AgentmemoryConfig
+
         adapters = {
             name: AdapterConfig(name=name, **spec)
             for name, spec in (data.get("adapters") or {}).items()
@@ -316,6 +319,7 @@ class Config:
             wait_before_send_seconds=int(
                 relay.get("wait_before_send_seconds") or 5),
             trusted_peers=list(data.get("trusted_peers") or []),
+            agentmemory=AgentmemoryConfig.from_dict(data.get("agentmemory")),
         )
 
     def agent_labels(self) -> list[dict[str, str]]:
@@ -838,6 +842,70 @@ class AgentRelay:
             "agents": available_agent_labels(self.cfg),
             "agents_missing": unavailable_agent_labels(self.cfg),
             "active_agents": list_active_agent_names(),
+        }
+
+    def _agentmemory_cfg(self):
+        from agentmemory_bridge import AgentmemoryConfig
+
+        cfg = getattr(self.cfg, "agentmemory", None)
+        if isinstance(cfg, AgentmemoryConfig):
+            return cfg
+        return AgentmemoryConfig()
+
+    async def _agentmemory_recall_for_agent(self, agent_id: str) -> str:
+        from agentmemory_bridge import fetch_recall_context
+
+        am = self._agentmemory_cfg()
+        if not am.enabled:
+            return ""
+        query = (
+            f"AgentRelay {agent_id} project context architecture "
+            f"preferences on node {self.cfg.node_name}"
+        )
+        return await fetch_recall_context(am, query=query, agent_id=agent_id)
+
+    async def _agentmemory_on_pty_close(
+        self, session: PTYSession, reason: str,
+    ) -> None:
+        from agentmemory_bridge import observe_session_end
+
+        am = self._agentmemory_cfg()
+        if not am.enabled or session.session_type != "agent":
+            return
+        await observe_session_end(
+            am,
+            agent_id=session.agent_name,
+            session_id=session.session_id,
+            reason=reason,
+            scrollback=session.scrollback_text(),
+            node_name=self.cfg.node_name,
+            uptime_seconds=session.uptime,
+        )
+
+    def _register_agentmemory_close_hook(self, session: PTYSession) -> None:
+        am = self._agentmemory_cfg()
+        if not am.enabled or not am.observe_on_close:
+            return
+        if session.session_type != "agent":
+            return
+
+        def _hook(_sid: str, reason: str) -> None:
+            asyncio.ensure_future(self._agentmemory_on_pty_close(session, reason))
+
+        session.chain_on_close(_hook)
+
+    async def _agentmemory_status(self) -> dict[str, Any]:
+        from agentmemory_bridge import health_ok
+
+        am = self._agentmemory_cfg()
+        if not am.enabled:
+            return {"enabled": False, "reachable": False}
+        reachable = await health_ok(am)
+        return {
+            "enabled": True,
+            "reachable": reachable,
+            "url": am.url,
+            "project": am.project,
         }
 
     def _peer_announcement_payload(self) -> dict[str, Any]:
@@ -1897,6 +1965,7 @@ class AgentRelay:
                                     rows=rows,
                                 )
                                 pty_registry.register(session)
+                                self._register_agentmemory_close_hook(session)
                                 self._trigger_heartbeat()
                                 created_session = True
                                 try:
@@ -2003,7 +2072,11 @@ class AgentRelay:
         resume = None if "No resume yet" in raw_resume else raw_resume
         memory = self.agent_data.get_memory(agent_id) or None
 
-        snippet = build_agent_snippet(self.cfg, nearby, resume=resume, memory=memory)
+        am_ctx = await self._agentmemory_recall_for_agent(agent_id)
+        snippet = build_agent_snippet(
+            self.cfg, nearby, resume=resume, memory=memory,
+            agentmemory_context=am_ctx or None,
+        )
         await asyncio.sleep(1.2)
         if not session.alive:
             return
@@ -2031,6 +2104,7 @@ class AgentRelay:
             **self._agent_availability_payload(),
             "nearby": self.peers.list(),
             "wait_before_send_seconds": self.cfg.wait_before_send_seconds,
+            "agentmemory": await self._agentmemory_status(),
         }
         return web.json_response(setup)
 
@@ -2054,7 +2128,13 @@ class AgentRelay:
         resume = None if not agent_id or "No resume yet" in raw_resume else raw_resume
         memory = self.agent_data.get_memory(agent_id) or None if agent_id else None
 
-        snippet = build_agent_snippet(self.cfg, nearby, resume=resume, memory=memory)
+        am_ctx = ""
+        if agent_id:
+            am_ctx = await self._agentmemory_recall_for_agent(agent_id)
+        snippet = build_agent_snippet(
+            self.cfg, nearby, resume=resume, memory=memory,
+            agentmemory_context=am_ctx or None,
+        )
         return web.json_response({"snippet": snippet})
 
     async def handle_api_approve(self, request: web.Request) -> web.Response:
