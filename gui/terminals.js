@@ -397,6 +397,10 @@
     term.loadAddon(fitAddon);
     term.open(viewport);
 
+    panel.addEventListener("mousedown", () => {
+      if (currentLayout !== "1") activateTab(id);
+    });
+
     viewport.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       if (!term.getSelection()) selectWordAtMouse(term, e.clientX, e.clientY);
