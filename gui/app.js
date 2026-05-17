@@ -195,6 +195,29 @@ function renderAgents(agents, agentsMissing) {
 
   if ([...launch.options].some((o) => o.value === prevLaunch)) launch.value = prevLaunch;
   if ([...termAgent.options].some((o) => o.value === prevTermAgent)) termAgent.value = prevTermAgent;
+  loadResumeSessions("agents-resume-session", launch.value);
+  loadResumeSessions("terminal-resume-session", termAgent.value);
+}
+
+async function loadResumeSessions(selectId, agent) {
+  const sel = el(selectId);
+  if (!sel || !agent) return;
+  const prev = sel.value;
+  sel.innerHTML = "<option value=\"\">No session (fresh start)</option>";
+  try {
+    const { ok, data } = await api(`/api/sessions/${encodeURIComponent(agent)}`);
+    if (ok && data.sessions && data.sessions.length) {
+      for (const s of data.sessions) {
+        const opt = document.createElement("option");
+        opt.value = s.sessionId;
+        const cwd = s.cwd ? s.cwd.replace(/.*\//, "") || s.cwd : "";
+        const date = s.startedAt ? new Date(s.startedAt).toLocaleString() : s.procStart;
+        opt.textContent = `${date}${cwd ? " · " + cwd : ""}`;
+        sel.appendChild(opt);
+      }
+      if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    }
+  } catch { /* ignore */ }
 }
 
 function renderNearby(list) {
@@ -812,7 +835,7 @@ el("btn-clear-send").addEventListener("click", () => {
   el("send-message").value = "";
   el("send-status").textContent = "";
 });
-function openAgentTerminal(agent, { injectSnippet = false, reuse = false, onOpen = null } = {}) {
+function openAgentTerminal(agent, { injectSnippet = false, reuse = false, onOpen = null, resumeSessionId = null } = {}) {
   if (!agent) return;
   showView("terminals");
   const profile = getLaunchProfile();
@@ -822,6 +845,7 @@ function openAgentTerminal(agent, { injectSnippet = false, reuse = false, onOpen
     profile,
     yolo: profile === "full_auto",
     onOpen,
+    resumeSessionId,
   });
 }
 
@@ -834,12 +858,21 @@ function openSshTerminal(nodeName, { reuse = false, onOpen = null } = {}) {
   });
 }
 
+el("terminal-agent").addEventListener("change", () => {
+  loadResumeSessions("terminal-resume-session", el("terminal-agent").value);
+});
+
+el("launch-agent").addEventListener("change", () => {
+  loadResumeSessions("agents-resume-session", el("launch-agent").value);
+});
+
 el("btn-new-terminal").addEventListener("click", () => {
   const agent = el("terminal-agent").value;
   if (!agent) return;
   try {
-    openAgentTerminal(agent, { injectSnippet: false, reuse: false });
-    setFooter(`New terminal for ${agent}`);
+    const resumeSessionId = el("terminal-resume-session").value || null;
+    openAgentTerminal(agent, { injectSnippet: false, reuse: false, resumeSessionId });
+    setFooter(resumeSessionId ? `Resuming session for ${agent}` : `New terminal for ${agent}`);
   } catch (e) {
     setFooter(`Terminal error: ${e.message}`);
   }
@@ -903,8 +936,9 @@ el("btn-open-terminal").addEventListener("click", () => {
   const agent = el("launch-agent").value;
   if (!agent) return;
   try {
-    openAgentTerminal(agent, { injectSnippet: false, reuse: false });
-    setFooter(`Opened fresh terminal for ${agent}`);
+    const resumeSessionId = el("agents-resume-session").value || null;
+    openAgentTerminal(agent, { injectSnippet: false, reuse: false, resumeSessionId });
+    setFooter(resumeSessionId ? `Resuming session for ${agent}` : `Opened fresh terminal for ${agent}`);
   } catch (e) {
     setFooter(`Terminal error: ${e.message}`);
   }

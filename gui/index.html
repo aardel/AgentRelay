@@ -100,6 +100,9 @@
             <button type="button" id="btn-launch-agent" class="btn primary">Launch</button>
             <button type="button" id="btn-open-terminal" class="btn ghost">Terminal only</button>
           </div>
+          <label>Resume past session
+            <select id="agents-resume-session"><option value="">No session (fresh start)</option></select>
+          </label>
           <label>How much freedom should the agent have?
             <select id="launch-profile"></select>
           </label>
@@ -223,11 +226,18 @@
           <h2>Live terminals</h2>
           <div class="row">
             <select id="terminal-agent"></select>
+            <select id="terminal-resume-session" aria-label="Resume past session"><option value="">Fresh start</option></select>
             <button type="button" id="btn-new-terminal" class="btn primary">New tab</button>
             <select id="terminal-ssh-host" aria-label="SSH connection"></select>
             <button type="button" id="btn-new-ssh-terminal" class="btn ghost">SSH shell</button>
             <button type="button" id="btn-relay-selection" class="btn ghost small">Relay selection...</button>
             <button type="button" id="btn-clear-terminal" class="btn ghost small">Clear</button>
+            <div class="terminal-layout-btns" id="terminal-layout-btns">
+              <button class="terminal-layout-btn active" data-layout="1" title="Single pane"><svg width="13" height="13" viewBox="0 0 4 4"><rect x="0" y="0" width="4" height="4" rx="0.4" fill="currentColor"/></svg></button>
+              <button class="terminal-layout-btn" data-layout="2h" title="Side by side"><svg width="13" height="13" viewBox="0 0 4 4"><rect x="0" y="0" width="1.7" height="4" rx="0.4" fill="currentColor"/><rect x="2.3" y="0" width="1.7" height="4" rx="0.4" fill="currentColor"/></svg></button>
+              <button class="terminal-layout-btn" data-layout="2v" title="Top and bottom"><svg width="13" height="13" viewBox="0 0 4 4"><rect x="0" y="0" width="4" height="1.7" rx="0.4" fill="currentColor"/><rect x="0" y="2.3" width="4" height="1.7" rx="0.4" fill="currentColor"/></svg></button>
+              <button class="terminal-layout-btn" data-layout="4" title="2×2 grid"><svg width="13" height="13" viewBox="0 0 4 4"><rect x="0" y="0" width="1.7" height="1.7" rx="0.3" fill="currentColor"/><rect x="2.3" y="0" width="1.7" height="1.7" rx="0.3" fill="currentColor"/><rect x="0" y="2.3" width="1.7" height="1.7" rx="0.3" fill="currentColor"/><rect x="2.3" y="2.3" width="1.7" height="1.7" rx="0.3" fill="currentColor"/></svg></button>
+            </div>
           </div>
           <label class="profile-inline">Freedom level
             <select id="launch-profile-terminals"></select>
