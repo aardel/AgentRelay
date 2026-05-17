@@ -1400,3 +1400,20 @@ setInterval(async () => {
     renderInbox(messages);
   }
 }, 3000);
+
+el("btn-get-latest")?.addEventListener("click", async () => {
+  const btn = el("btn-get-latest");
+  const status = el("update-status");
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  status.textContent = "";
+  const { ok, data } = await api("/api/update/pull", { method: "POST" });
+  btn.disabled = false;
+  btn.textContent = "Get latest files";
+  if (!ok) {
+    status.textContent = data.error || "Could not check for updates.";
+    return;
+  }
+  status.textContent = data.message || (data.already_current ? "Already up to date." : "Updated.");
+  setFooter(data.message || "");
+});

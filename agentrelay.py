@@ -2273,6 +2273,68 @@ class AgentRelay:
         asyncio.create_task(_shutdown())
         return web.json_response({"ok": True})
 
+    async def handle_api_update_pull(self, request: web.Request) -> web.Response:
+        """Pull latest files from git and run the install script. Localhost-only."""
+        if not self._localhost(request):
+            return web.json_response({"error": "localhost only"}, status=403)
+
+        project_root = Path(__file__).parent
+
+        async def _run_proc(argv: list[str], timeout: int) -> tuple[int, str, str]:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(project_root),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return (
+                proc.returncode or 0,
+                stdout.decode("utf-8", errors="replace").strip(),
+                stderr.decode("utf-8", errors="replace").strip(),
+            )
+
+        try:
+            _, pull_out, pull_err = await _run_proc(["git", "pull"], timeout=30)
+        except asyncio.TimeoutError:
+            return web.json_response({"ok": False, "message": "Timed out while getting latest files."})
+        except Exception as exc:
+            return web.json_response({"ok": False, "message": f"Could not get latest files: {exc}"})
+
+        already_current = (
+            "Already up to date" in pull_out or "Already up-to-date" in pull_out
+        )
+
+        install_msg = ""
+        if sys.platform == "win32":
+            install_script = project_root / "install.ps1"
+            install_argv = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(install_script)]
+        else:
+            install_script = project_root / "install.sh"
+            install_argv = ["bash", str(install_script)]
+
+        if not already_current and install_script.exists():
+            try:
+                _, install_out, install_err = await _run_proc(install_argv, timeout=120)
+                install_msg = install_out or install_err
+            except asyncio.TimeoutError:
+                install_msg = "Install script timed out."
+            except Exception as exc:
+                install_msg = f"Install script error: {exc}"
+
+        if already_current:
+            message = "This computer already has the newest files."
+        else:
+            message = "Got the latest files. Restart the app to apply changes."
+
+        return web.json_response({
+            "ok": True,
+            "already_current": already_current,
+            "message": message,
+            "detail": pull_out or pull_err,
+            "install": install_msg,
+        })
+
     async def handle_api_resume_get(self, request: web.Request) -> web.Response:
         if not self._auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -2555,6 +2617,7 @@ class AgentRelay:
         app.router.add_post("/api/broadcast", self.handle_api_broadcast)
         app.router.add_post("/api/coordinate", self.handle_coordinate)
         app.router.add_post("/api/relay/stop", self.handle_api_relay_stop)
+        app.router.add_post("/api/update/pull", self.handle_api_update_pull)
         app.router.add_get("/api/terminal/sessions", self.handle_api_terminal_sessions)
         app.router.add_get("/api/profiles", self.handle_api_profiles)
         app.router.add_get("/api/skills", self.handle_api_skills)
