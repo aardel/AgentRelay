@@ -66,6 +66,7 @@ from ssh_hosts import (
     test_ssh_connectivity,
 )
 from agent_data import AgentDataStore
+from idea_store import IdeaStore
 
 SERVICE_TYPE = "_agentrelay._tcp.local."
 INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
@@ -826,6 +827,7 @@ class AgentRelay:
         self.talk = ConversationStore()
         self.pairing = PairingManager()
         self.agent_data = AgentDataStore()
+        self.idea_store = IdeaStore()
         self.azc: AsyncZeroconf | None = None
         self.browser: AsyncServiceBrowser | None = None
         self.service_info: ServiceInfo | None = None
@@ -2722,6 +2724,53 @@ class AgentRelay:
         results = remove_all_skills(ROOT, target)
         return web.json_response({"ok": True, "messages": results})
 
+    # ------------------------------------------------------------------ #
+    # Ideas API                                                            #
+    # ------------------------------------------------------------------ #
+
+    async def handle_api_ideas_list(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"ideas": self.idea_store.list_all()})
+
+    async def handle_api_ideas_create(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        title = str(body.get("title", "")).strip()
+        if not title:
+            return web.json_response({"error": "title required"}, status=400)
+        idea = self.idea_store.create(
+            title=title,
+            description=str(body.get("description", "")),
+            priority=str(body.get("priority", "medium")),
+        )
+        return web.json_response({"idea": idea}, status=201)
+
+    async def handle_api_idea_update(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        idea_id = request.match_info["id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        idea = self.idea_store.update(idea_id, **body)
+        if idea is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"idea": idea})
+
+    async def handle_api_idea_delete(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        idea_id = request.match_info["id"]
+        if not self.idea_store.delete(idea_id):
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"ok": True})
+
     def build_app(self) -> web.Application:
         app = web.Application(client_max_size=16 * 1024 * 1024)  # 16 MB — large agent prompts can exceed 1 MB
         app.router.add_get("/health", self.handle_health)
@@ -2789,6 +2838,10 @@ class AgentRelay:
         app.router.add_delete("/api/ssh-hosts/{node}", self.handle_api_ssh_host_delete)
         app.router.add_post("/api/ssh-hosts/{node}/test", self.handle_api_ssh_host_test)
         app.router.add_post("/api/ssh-hosts/{node}/rename", self.handle_api_ssh_host_rename)
+        app.router.add_get("/api/ideas", self.handle_api_ideas_list)
+        app.router.add_post("/api/ideas", self.handle_api_ideas_create)
+        app.router.add_patch("/api/ideas/{id}", self.handle_api_idea_update)
+        app.router.add_delete("/api/ideas/{id}", self.handle_api_idea_delete)
         return app
 
 

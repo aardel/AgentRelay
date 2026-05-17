@@ -24,6 +24,9 @@
         <button type="button" class="nav-item" data-view="messages">Inbox</button>
         <button type="button" class="nav-item" data-view="threads">Past chats</button>
         <button type="button" class="nav-item" data-view="tasks">Activity</button>
+        <button type="button" class="nav-item" data-view="ideas">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>Ideas
+        </button>
         <button type="button" class="nav-item" data-view="skills">Extra commands</button>
         <button type="button" class="nav-item" data-view="settings">Settings</button>
       </nav>
@@ -310,6 +313,30 @@
         </article>
       </section>
 
+      <section id="view-ideas" class="view">
+        <header class="view-header">
+          <h2>Ideas</h2>
+          <button type="button" id="ideas-add-btn" class="btn primary">+ Add idea</button>
+        </header>
+        <p class="view-header-desc">Capture ideas, set priority, and queue them for agents to pick up automatically when everyone is at rest.</p>
+        <div class="ideas-filter-bar">
+          <button class="ideas-filter-btn active" data-filter="all">All</button>
+          <button class="ideas-filter-btn" data-filter="draft">Draft</button>
+          <button class="ideas-filter-btn" data-filter="queued">Queued</button>
+          <button class="ideas-filter-btn" data-filter="done">Done</button>
+        </div>
+        <div class="ideas-layout">
+          <article class="card ideas-list-card">
+            <ul id="ideas-list" class="ideas-list">
+              <li class="ideas-empty">Loading…</li>
+            </ul>
+          </article>
+          <article class="card ideas-detail-card" id="ideas-form-panel">
+            <p class="ideas-form-hint">Select an idea or add a new one.</p>
+          </article>
+        </div>
+      </section>
+
       <section id="view-skills" class="view">
         <header class="view-header">
           <h2>Extra commands</h2>
@@ -367,6 +394,7 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
   <script src="/gui/agent-colors.js"></script>
   <script src="/gui/terminals.js"></script>
+  <script src="/gui/ideas.js"></script>
   <script src="/gui/app.js"></script>
 </body>
 </html>
