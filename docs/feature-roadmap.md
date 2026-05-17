@@ -72,8 +72,8 @@ git pull
 
 ### Roadmap: make this user-friendly in the app
 
-- [ ] **Settings → Updates** panel: “Check for updates” / “This machine is up to date” (no `git` words in the UI).
-- [ ] One-click **Get latest on this machine** (runs get-latest + install hook, shows success/failure in plain English).
+- [x] **Settings → Updates** panel: “Check for updates” / “This machine is up to date” (no `git` words in the UI).
+- [x] One-click **Get latest on this machine** (runs get-latest + install hook, shows success/failure in plain English).
 - [ ] Optional reminder when a peer’s AgentRelay version looks older (compare version from `/api/status`).
 - [ ] Short in-app blurb: *“GitHub keeps all your computers on the same AgentRelay build. You only need to get latest after someone changes the project.”*
 
@@ -93,21 +93,22 @@ Legend: **Done** · **Partial** · **Not started**
 | Interactive delivery to open terminals | **Done** | Mac ↔ Windows verified |
 | Skills installer (`/relay-send`, etc.) | **Done** | Extra commands view |
 | Permission profiles (backend + CLI) | **Done** | `permission_profiles.py`, `agent-send --profile` |
-| Permission level in GUI | **Partial** | “Freedom level” dropdown on launch (replaces YOLO checkbox) |
+| Permission level in GUI | **Done** | “Freedom level” dropdown on launch and send (replaces YOLO checkbox) |
 | Task queue + Activity view (SSE) | **Done** | `task_queue.py`, Activity tab |
 | SSH presets (backend + API) | **Done** | `ssh_hosts.py` |
 | SSH on Home screen | **Done** | List, add, test, discovered-computer prompts |
-| Agent notes (resume + memory) | **Done** | `agent_data.py`, Agent notes tab (branch `codex/agent-resumes-memory`) |
+| Agent notes (resume + memory) | **Done** | `agent_data.py`, Agent notes tab |
 | Group task (multi-agent coordinate) | **Done** | `POST /coordinate` + `/api/coordinate` |
 | Past chats (talk threads) | **Done** | `talk.py`, Past chats tab |
-| Remote terminal attach from other computers | **Not started** | `[attach]` opens local session only |
-| Remote SSH terminal tabs | **Not started** | Presets saved; no SSH shell UI yet |
+| Remote terminal attach from other computers | **Done** | Activity Open can attach to peer sessions |
+| Remote SSH terminal tabs | **Done** | Saved SSH presets can open shell tabs |
 | Dedicated Machines / Permissions / Logs views | **Not started** | Folded into Home / Settings for now |
 | Activity / audit log (full history) | **Not started** | Inbox + Activity cover basics |
-| In-app “get latest files” (no git words) | **Not started** | Documented in GitHub section above |
+| In-app “get latest files” (no git words) | **Done** | Settings button runs update/install flow |
+| Terminal usage bar MVP | **Done** | PTY output parser + per-session usage API + UI strip |
 | Workflow builder, file sync, policy files | **Not started** | Phase 3+ |
 
-**Current branch note:** Agent notes + resume/memory APIs may be on `codex/agent-resumes-memory` until merged to `main`. See [TASKS.md](TASKS.md) for the live checklist.
+**Current branch note:** Agent notes + resume/memory APIs are on `main`. See [TASKS.md](TASKS.md) for the live checklist.
 
 ## Redesigned GUI
 
@@ -190,10 +191,10 @@ Adapters declare `usage_reporting: native | parse | none` in config so the UI kn
 
 #### Implementation approach (proposed)
 
-1. **PTY tap** — optional parser on terminal output stream for known patterns (regex per agent), feeding a `session_usage` struct on the daemon.
+1. **PTY tap** — optional parser on terminal output stream for known patterns (regex per agent), feeding a `session_usage` struct on the daemon. **MVP done.**
 2. **Adapter poll** — for agents with a side-channel status command or JSON status file, poll every 30s while session is active.
 3. **User calibration** — store per-agent `tokens_per_minute` EMA in `~/.config/agentrelay/usage_stats.json` (local only) to improve ETA when the agent does not report remaining tokens (estimate from context size minus parsed usage).
-4. **WebSocket push** — extend `/terminal` or add `/api/sessions/{id}/usage` + SSE so the usage bar updates without polling.
+4. **WebSocket push** — extend `/terminal` or add `/api/sessions/{id}/usage` + SSE so the usage bar updates without polling. **MVP uses polling against `/api/terminal/sessions/{id}/usage`; push/SSE remains future polish.**
 5. **Privacy** — usage stats stay local unless user opts in to sync across their machines.
 
 #### API (proposed)
@@ -536,4 +537,3 @@ Each machine runs the full stack. Remote peers use the relay protocol; remote te
 - Enterprise SSO.
 - Complex visual workflow editor.
 - Cross-internet relay without VPN or explicit tunneling.
-

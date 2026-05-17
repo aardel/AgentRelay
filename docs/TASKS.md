@@ -19,26 +19,29 @@ Living checklist. Implementation status table: [feature-roadmap.md](feature-road
 - [x] **SSH presets** backend + **Home** screen UI (list, add, test, discovered computers)
 - [x] **Group task** tab + `/api/coordinate`
 - [x] **Past chats** (`talk.py`)
-- [x] **Agent notes** (resume + memory) — on branch `codex/agent-resumes-memory`
+- [x] **Agent notes** (resume + memory)
+- [x] Freedom level when **sending** to remote agent
+- [x] Remote **Open** from Activity for peer machine sessions
+- [x] Launch saved SSH presets in **remote SSH terminal** tabs
+- [x] **In-app updates** — “Get latest files” in Settings (no git jargon)
+- [x] **Terminal usage bar MVP** — per-session parser, API, and UI strip
 - [x] Docs: implementation status, GitHub sync guide (plain language), GUI friendly labels
 
 ## Active backlog
 
 ### Docs & onboarding
 
-- [ ] **In-app updates** — “Check for updates” / “Get latest on this machine” (no git jargon) — [feature-roadmap.md](feature-roadmap.md#github--keeping-every-machine-on-the-same-version)
-- [ ] Merge `codex/agent-resumes-memory` → `main` and sync WINPC
+- [ ] Keep README/docs aligned after each feature phase
 
 ### GUI polish
 
-- [ ] Freedom level when **sending** to remote agent (not only on terminal launch)
 - [ ] SSH rename flow in UI (API exists; “Apply” on drift only prefills add form today)
-- [ ] Remote **Open** from Activity for peer machine sessions
+- [ ] Terminal usage bar full version: native agent usage sources, history, warnings, and pace comparison
 
 ### Phase 2 (SSH + remote)
 
 - [ ] Remote agent detection over SSH
-- [ ] Launch agents in **remote SSH terminal** tabs
+- [ ] Launch agents into saved SSH terminal tabs
 - [ ] Trust levels for peers
 - [ ] Project-specific launch presets
 
@@ -57,9 +60,11 @@ Living checklist. Implementation status table: [feature-roadmap.md](feature-road
 
 - [ ] `python -m unittest discover -s tests` green on Mac and WINPC
 - [ ] Activity tab updates live when sending a task
-- [ ] **Open** on a running task opens the right local terminal
+- [ ] **Open** on a running task opens the right local or remote terminal
 - [ ] Freedom level: Full auto adds expected CLI flags on launch
+- [ ] Freedom level on Send records the expected Activity permission level
 - [ ] Group task completes (Group task tab)
 - [ ] Agent notes: save resume + memory fact, reload
-- [ ] SSH: test & save blocks bad key; discovered computer prompt on Home
+- [ ] SSH: test & save blocks bad key; discovered computer prompt on Home; SSH shell opens
+- [ ] Terminal usage strip appears under agent terminals and stays hidden/neutral for SSH shells
 - [ ] Get latest files on both machines after a change — [sync guide](feature-roadmap.md#github--keeping-every-machine-on-the-same-version)
