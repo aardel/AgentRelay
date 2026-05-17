@@ -237,7 +237,7 @@ def build_ssh_shell_argv(host: SSHHost, timeout: int = 10) -> list[str]:
         "-p", str(host.port),
     ]
     if host.key_path:
-        cmd += ["-i", str(Path(host.key_path).expanduser())]
+        cmd += ["-i", Path(host.key_path).expanduser().as_posix()]
     cmd.append(f"{host.user}@{host.host}" if host.user else host.host)
     return cmd
 
