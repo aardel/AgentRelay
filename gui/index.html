@@ -224,6 +224,8 @@
           <div class="row">
             <select id="terminal-agent"></select>
             <button type="button" id="btn-new-terminal" class="btn primary">New tab</button>
+            <select id="terminal-ssh-host" aria-label="SSH connection"></select>
+            <button type="button" id="btn-new-ssh-terminal" class="btn ghost">SSH shell</button>
             <button type="button" id="btn-relay-selection" class="btn ghost small">Relay selection...</button>
             <button type="button" id="btn-clear-terminal" class="btn ghost small">Clear</button>
           </div>
@@ -237,7 +239,7 @@
           <div class="terminal-tabs" id="terminal-tabs"></div>
           <div id="terminal-panels" class="terminal-panels"></div>
         </div>
-        <p class="hint">Click × to close a tab. <strong>New tab</strong> starts a fresh session. <strong>Launch</strong> (Agents view) reattaches to a running agent if one exists.</p>
+        <p class="hint">Click × to close a tab. <strong>New tab</strong> starts a fresh local agent session. <strong>SSH shell</strong> opens a saved remote connection.</p>
       </section>
 
       <section id="view-messages" class="view">

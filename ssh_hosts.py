@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import time
@@ -223,6 +224,27 @@ def test_ssh_connectivity(
         return False, f"timed out after {timeout}s"
     except Exception as exc:
         return False, str(exc)
+
+
+def build_ssh_shell_argv(host: SSHHost, timeout: int = 10) -> list[str]:
+    """Return argv for an interactive SSH shell using a saved preset."""
+    cmd = [
+        "ssh",
+        "-tt",
+        "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={timeout}",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-p", str(host.port),
+    ]
+    if host.key_path:
+        cmd += ["-i", str(Path(host.key_path).expanduser())]
+    cmd.append(f"{host.user}@{host.host}" if host.user else host.host)
+    return cmd
+
+
+def describe_ssh_argv(argv: list[str]) -> str:
+    """Human-readable SSH command for logs/errors without exposing shell parsing."""
+    return " ".join(shlex.quote(part) for part in argv)
 
 
 # ---------------------------------------------------------------------------

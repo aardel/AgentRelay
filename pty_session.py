@@ -49,6 +49,8 @@ class PTYSession:
     agent_name  : Logical agent name ("claude", "codex", etc.).
     node        : Owning node name (this machine).
     cols, rows  : Current terminal dimensions.
+    session_type: "agent" for local agent CLIs, "ssh" for SSH shells.
+    target      : Optional remote node/preset for non-agent sessions.
     """
 
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -56,6 +58,8 @@ class PTYSession:
     node: str = field(default_factory=lambda: os.environ.get("HOSTNAME", "local"))
     cols: int = 220
     rows: int = 50
+    session_type: str = "agent"
+    target: str = ""
 
     # Private state
     _pty: Any = field(default=None, init=False, repr=False)
@@ -239,9 +243,28 @@ class PTYRegistry:
     def remove(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
 
+    @staticmethod
+    def _session_type(session: PTYSession) -> str:
+        session_type = getattr(session, "session_type", "agent")
+        return session_type if isinstance(session_type, str) else "agent"
+
     def find_alive_by_agent(self, agent_name: str) -> PTYSession | None:
         for session in self._sessions.values():
-            if session.agent_name == agent_name and session.alive:
+            if (
+                self._session_type(session) == "agent"
+                and session.agent_name == agent_name
+                and session.alive
+            ):
+                return session
+        return None
+
+    def find_alive_by_ssh_node(self, node_name: str) -> PTYSession | None:
+        for session in self._sessions.values():
+            if (
+                self._session_type(session) == "ssh"
+                and session.target == node_name
+                and session.alive
+            ):
                 return session
         return None
 
@@ -251,6 +274,8 @@ class PTYRegistry:
         out: list[str] = []
         for session in self._sessions.values():
             if not session.alive:
+                continue
+            if self._session_type(session) != "agent":
                 continue
             if session.agent_name in seen:
                 continue
@@ -264,6 +289,8 @@ class PTYRegistry:
                 "session_id": s.session_id,
                 "agent": s.agent_name,
                 "node": s.node,
+                "session_type": self._session_type(s),
+                "target": getattr(s, "target", ""),
                 "cols": s.cols,
                 "rows": s.rows,
                 "alive": s.alive,

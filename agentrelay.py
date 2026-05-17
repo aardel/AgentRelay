@@ -57,7 +57,14 @@ from pairing import PairingManager
 from talk import ConversationStore
 from pty_session import PTYSession, pty_registry
 from task_queue import TaskQueue
-from ssh_hosts import SSHHost, get_machine_id, get_store as get_ssh_store, test_ssh_connectivity
+from ssh_hosts import (
+    SSHHost,
+    build_ssh_shell_argv,
+    describe_ssh_argv,
+    get_machine_id,
+    get_store as get_ssh_store,
+    test_ssh_connectivity,
+)
 from agent_data import AgentDataStore
 
 SERVICE_TYPE = "_agentrelay._tcp.local."
@@ -1752,6 +1759,11 @@ class AgentRelay:
                         agent = frame.get("agent", "claude")
                         cols = int(frame.get("cols", 220))
                         rows = int(frame.get("rows", 50))
+                        session_type = (
+                            frame.get("session_type")
+                            or frame.get("kind")
+                            or ("ssh" if frame.get("ssh_node") else "agent")
+                        )
 
                         if sid:
                             # Re-attach to existing session
@@ -1764,6 +1776,78 @@ class AgentRelay:
                                 continue
                             # Remote viewer — no write_token
                             await session.subscribe(ws, owner=False)
+                        elif session_type == "ssh":
+                            node_name = (frame.get("ssh_node") or "").strip()
+                            if not node_name:
+                                await ws.send_str(json.dumps(
+                                    {"type": "error", "session_id": None,
+                                     "code": "ssh_preset_required",
+                                     "message": "ssh_node is required"}))
+                                continue
+                            store = get_ssh_store()
+                            ssh_host = store.get(node_name)
+                            if not ssh_host:
+                                await ws.send_str(json.dumps(
+                                    {"type": "error", "session_id": None,
+                                     "code": "ssh_preset_not_found",
+                                     "message": f"no SSH preset for '{node_name}'"}))
+                                continue
+
+                            reuse = bool(frame.get("reuse", False))
+                            session = (
+                                pty_registry.find_alive_by_ssh_node(node_name)
+                                if reuse else None
+                            )
+                            created_session = False
+                            if not session:
+                                from relay_client import validate_launch_argv
+
+                                argv = build_ssh_shell_argv(ssh_host)
+                                path_err = validate_launch_argv(argv)
+                                if path_err:
+                                    await ws.send_str(json.dumps(
+                                        {"type": "error", "session_id": None,
+                                         "code": "spawn_failed",
+                                         "message": path_err}))
+                                    continue
+
+                                session = PTYSession(
+                                    agent_name=f"ssh:{node_name}",
+                                    node=self.cfg.node_name,
+                                    cols=cols,
+                                    rows=rows,
+                                    session_type="ssh",
+                                    target=node_name,
+                                )
+                                pty_registry.register(session)
+                                created_session = True
+                                try:
+                                    await session.start(argv)
+                                except Exception as exc:
+                                    created_session = False
+                                    pty_registry.remove(session.session_id)
+                                    session = None
+                                    log.warning(
+                                        "SSH PTY spawn failed for %s %s: %s",
+                                        node_name, describe_ssh_argv(argv), exc)
+                                    await ws.send_str(json.dumps(
+                                        {"type": "error", "session_id": None,
+                                         "code": "spawn_failed",
+                                         "message": (
+                                             f"Could not start SSH shell for "
+                                             f"{node_name}: {exc}"
+                                         )}))
+                                    continue
+                            await session.subscribe(
+                                ws,
+                                owner=True,
+                                include_scrollback=reuse,
+                                extra_ack={
+                                    "new_session": created_session,
+                                    "session_type": "ssh",
+                                    "ssh_node": node_name,
+                                },
+                            )
                         else:
                             resolved = self.cfg.resolve_adapter_name(
                                 agent, prefer_interactive=True)
@@ -1834,7 +1918,10 @@ class AgentRelay:
                                 ws,
                                 owner=True,
                                 include_scrollback=reuse,
-                                extra_ack={"new_session": created_session},
+                                extra_ack={
+                                    "new_session": created_session,
+                                    "session_type": "agent",
+                                },
                             )
                             if created_session and frame.get("inject_snippet"):
                                 asyncio.create_task(

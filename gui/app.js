@@ -10,6 +10,7 @@ if (AUTH_TOKEN) {
 
 const el = (id) => document.getElementById(id);
 let sendTargets = [];
+let sshHosts = [];
 let lastInboxTs = 0;
 
 const YOLO_STORAGE_KEY = "agentrelay_yolo_mode";
@@ -425,10 +426,36 @@ async function refresh() {
 async function refreshSSH() {
   const { ok, data } = await api("/api/ssh-hosts");
   if (!ok) return;
-  renderSSHHosts(data.hosts || []);
+  sshHosts = data.hosts || [];
+  renderSSHHosts(sshHosts);
+  renderSSHTerminalChoices(sshHosts);
 
   const pending = await api("/api/ssh-hosts/pending-presets");
   renderSSHPending(pending.data.pending || []);
+}
+
+function renderSSHTerminalChoices(hosts) {
+  const sel = el("terminal-ssh-host");
+  const btn = el("btn-new-ssh-terminal");
+  if (!sel || !btn) return;
+  sel.innerHTML = "";
+  if (!hosts.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No SSH connections";
+    sel.appendChild(opt);
+    sel.disabled = true;
+    btn.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  btn.disabled = false;
+  for (const h of hosts) {
+    const opt = document.createElement("option");
+    opt.value = h.node_name;
+    opt.textContent = `${h.node_name} (${h.user}@${h.host})`;
+    sel.appendChild(opt);
+  }
 }
 
 function renderSSHHosts(hosts) {
@@ -447,12 +474,16 @@ function renderSSHHosts(hosts) {
           <div class="peer-meta">${h.user}@${h.host}:${h.port}</div>
         </div>
         <div class="row">
+          <button type="button" class="btn ghost small btn-ssh-shell" data-node="${h.node_name}">Shell</button>
           <button type="button" class="btn ghost small btn-ssh-test" data-node="${h.node_name}">Test</button>
           <button type="button" class="btn ghost small btn-ssh-delete" data-node="${h.node_name}">Delete</button>
         </div>
       </div>`;
     ul.appendChild(li);
   }
+  ul.querySelectorAll(".btn-ssh-shell").forEach(btn => {
+    btn.addEventListener("click", () => openSshTerminal(btn.dataset.node));
+  });
   ul.querySelectorAll(".btn-ssh-test").forEach(btn => {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
@@ -794,6 +825,15 @@ function openAgentTerminal(agent, { injectSnippet = false, reuse = false, onOpen
   });
 }
 
+function openSshTerminal(nodeName, { reuse = false, onOpen = null } = {}) {
+  if (!nodeName) return;
+  showView("terminals");
+  window.AgentRelayTerminals.openSshTerminal(nodeName, API_PORT, AUTH_TOKEN, {
+    reuse,
+    onOpen,
+  });
+}
+
 el("btn-new-terminal").addEventListener("click", () => {
   const agent = el("terminal-agent").value;
   if (!agent) return;
@@ -802,6 +842,20 @@ el("btn-new-terminal").addEventListener("click", () => {
     setFooter(`New terminal for ${agent}`);
   } catch (e) {
     setFooter(`Terminal error: ${e.message}`);
+  }
+});
+
+el("btn-new-ssh-terminal").addEventListener("click", () => {
+  const nodeName = el("terminal-ssh-host").value;
+  if (!nodeName) {
+    setFooter("Save an SSH connection first");
+    return;
+  }
+  try {
+    openSshTerminal(nodeName);
+    setFooter(`Opening SSH shell for ${nodeName}`);
+  } catch (e) {
+    setFooter(`SSH terminal error: ${e.message}`);
   }
 });
 

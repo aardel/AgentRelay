@@ -251,6 +251,9 @@
   function openTerminal(agent, port, token, options) {
     options = options || {};
     const sessionId = options.sessionId || null;
+    const sessionType = options.sessionType || (options.sshNode ? "ssh" : "agent");
+    const sshNode = options.sshNode || null;
+    const labelText = options.label || (sessionType === "ssh" ? `SSH ${sshNode}` : agent);
     const injectSnippet = Boolean(options.injectSnippet);
     const reuse = options.reuse === true;
     const yolo = Boolean(options.yolo);
@@ -265,7 +268,7 @@
     const wrap = document.createElement("div");
     wrap.className = "terminal-tab";
     wrap.setAttribute("role", "tab");
-    if (global.AgentRelayColors) {
+    if (sessionType === "agent" && global.AgentRelayColors) {
       global.AgentRelayColors.applyAgentColor(wrap, agent);
     }
 
@@ -275,14 +278,14 @@
     const swatch = document.createElement("span");
     swatch.className = "agent-swatch";
     label.appendChild(swatch);
-    label.appendChild(document.createTextNode(agent));
-    label.title = `Show ${agent}`;
+    label.appendChild(document.createTextNode(labelText));
+    label.title = `Show ${labelText}`;
     label.addEventListener("click", () => activateTab(id));
 
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
     closeBtn.className = "terminal-tab-close";
-    closeBtn.setAttribute("aria-label", `Close ${agent} tab`);
+    closeBtn.setAttribute("aria-label", `Close ${labelText} tab`);
     closeBtn.innerHTML = "&times;";
     closeBtn.title = "Close tab";
     closeBtn.addEventListener("click", (e) => {
@@ -318,7 +321,17 @@
       showContextMenu(e.clientX, e.clientY);
     });
 
-    tabs.set(id, { wrap, panel, term, fitAddon, ws: null, agent, sessionId: null });
+    tabs.set(id, {
+      wrap,
+      panel,
+      term,
+      fitAddon,
+      ws: null,
+      agent,
+      sessionType,
+      sshNode,
+      sessionId: null,
+    });
     tabsEl().appendChild(wrap);
     panelsEl().appendChild(panel);
     activateTab(id);
@@ -330,9 +343,20 @@
     ws.onopen = () => {
       const msg = sessionId
         ? { type: "open", session_id: sessionId }
+        : sessionType === "ssh"
+          ? {
+              type: "open",
+              session_id: null,
+              session_type: "ssh",
+              ssh_node: sshNode,
+              cols: term.cols,
+              rows: term.rows,
+              reuse,
+            }
         : {
             type: "open",
             session_id: null,
+            session_type: "agent",
             agent,
             cols: term.cols,
             rows: term.rows,
@@ -361,7 +385,7 @@
           if (frame.scrollback) writeVt(frame.scrollback);
           fitAddon.fit();
           if (typeof options.onOpen === "function") options.onOpen(frame);
-          flushPendingForAgent(tab.agent);
+          if (tab.sessionType === "agent") flushPendingForAgent(tab.agent);
           break;
         case "data":
           if (frame.data) writeVt(frame.data);
@@ -416,6 +440,20 @@
     return id;
   }
 
+  function openSshTerminal(nodeName, port, token, options) {
+    options = options || {};
+    if (!nodeName) return null;
+    return openTerminal(`ssh:${nodeName}`, port, token, {
+      ...options,
+      sessionType: "ssh",
+      sshNode: nodeName,
+      label: options.label || `SSH ${nodeName}`,
+      injectSnippet: false,
+      yolo: false,
+      profile: null,
+    });
+  }
+
   function getActiveSelection() {
     let selection = "";
     tabs.forEach((tab) => {
@@ -446,6 +484,7 @@
 
   global.AgentRelayTerminals = {
     openTerminal,
+    openSshTerminal,
     closeTab,
     deliverToAgent,
     getActiveSelection,
