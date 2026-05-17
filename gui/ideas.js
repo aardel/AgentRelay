@@ -1,30 +1,54 @@
-/* Ideas panel — list, create, edit, queue, delete */
+/* Ideas panel — brainstorm, concept, and execution workflow */
 
 (function () {
   "use strict";
 
   const PRIORITY_LABEL = { high: "High", medium: "Med", low: "Low" };
   const PRIORITY_CLASS = { high: "priority-high", medium: "priority-med", low: "priority-low" };
-  const STATUS_LABEL = { draft: "Draft", queued: "Queued", in_progress: "In progress", done: "Done" };
-  const STATUS_CLASS = { draft: "status-draft", queued: "status-queued", in_progress: "status-inprogress", done: "status-done" };
+  const STATUS_LABEL = {
+    draft: "Draft",
+    exploring: "Exploring",
+    ready: "Ready",
+    concept: "Concept",
+    queued: "Queued",
+    in_progress: "In progress",
+    done: "Done",
+  };
+  const STATUS_CLASS = {
+    draft: "status-draft",
+    exploring: "status-inprogress",
+    ready: "status-queued",
+    concept: "status-queued",
+    queued: "status-queued",
+    in_progress: "status-inprogress",
+    done: "status-done",
+  };
 
   let _ideas = [];
-  let _filter = "all";      // "all" | "draft" | "queued" | "done"
+  let _agents = [];
+  let _activeAgents = [];
+  let _filter = "all";
   let _selectedId = null;
   let _editing = false;
-
-  // ── DOM refs ──────────────────────────────────────────────────────────────
+  let _busy = false;
 
   function el(id) { return document.getElementById(id); }
+  const ideasList = () => el("ideas-list");
+  const formPanel = () => el("ideas-form-panel");
+  const filterBtns = () => document.querySelectorAll(".ideas-filter-btn");
 
-  const ideasList    = () => el("ideas-list");
-  const formPanel    = () => el("ideas-form-panel");
-  const filterBtns   = () => document.querySelectorAll(".ideas-filter-btn");
+  function authToken() {
+    return sessionStorage.getItem("agentrelay_token")
+      || new URLSearchParams(window.location.search).get("token")
+      || "";
+  }
 
-  // ── API helpers ───────────────────────────────────────────────────────────
+  function apiPort() {
+    return parseInt(new URLSearchParams(window.location.search).get("port") || "9876", 10);
+  }
 
   function authHeader() {
-    return { "X-Agent-Token": window.AGENT_TOKEN || "" };
+    return { "X-Agent-Token": authToken() };
   }
 
   async function apiFetch(method, path, body) {
@@ -33,27 +57,54 @@
       headers: { ...authHeader(), "Content-Type": "application/json" },
     };
     if (body !== undefined) opts.body = JSON.stringify(body);
-    const resp = await fetch(path, opts);
-    return resp;
+    return fetch(path, opts);
   }
 
-  // ── Load & render ─────────────────────────────────────────────────────────
+  async function loadAgents() {
+    try {
+      const resp = await apiFetch("GET", "/api/status");
+      if (!resp.ok) return;
+      const data = await resp.json();
+      _agents = data.agents || [];
+      _activeAgents = data.active_agents || [];
+    } catch (_) { /* offline */ }
+  }
 
   async function loadIdeas() {
+    await loadAgents();
     try {
       const resp = await apiFetch("GET", "/api/ideas");
       if (!resp.ok) return;
       const data = await resp.json();
       _ideas = data.ideas || [];
       renderList();
+      if (_selectedId) renderForm();
     } catch (_) { /* offline */ }
   }
 
   function visibleIdeas() {
     if (_filter === "all") return _ideas;
     if (_filter === "done") return _ideas.filter(i => i.status === "done");
-    if (_filter === "queued") return _ideas.filter(i => i.status === "queued");
+    if (_filter === "queued") {
+      return _ideas.filter(i => i.status === "queued" || i.status === "in_progress");
+    }
+    if (_filter === "concept") {
+      return _ideas.filter(i => ["exploring", "ready", "concept"].includes(i.status));
+    }
     return _ideas.filter(i => i.status === "draft");
+  }
+
+  function agentOptions(selected) {
+    if (!_agents.length) {
+      return '<option value="">No agents configured</option>';
+    }
+    return _agents.map(a => {
+      const id = a.id || a;
+      const label = a.label || id;
+      const sel = id === selected ? " selected" : "";
+      const active = _activeAgents.includes(id) ? " ●" : "";
+      return `<option value="${escHtml(id)}"${sel}>${escHtml(label)}${active}</option>`;
+    }).join("");
   }
 
   function renderList() {
@@ -72,10 +123,11 @@
         </div>
         <div class="ideas-item-meta">
           <span class="ideas-badge ${STATUS_CLASS[idea.status] || ""}">${STATUS_LABEL[idea.status] || idea.status}</span>
-          <span class="ideas-item-date">${fmtDate(idea.created_at)}</span>
+          ${idea.findings?.length ? `<span class="ideas-item-date">${idea.findings.length} finding(s)</span>` : ""}
+          <span class="ideas-item-date">${fmtDate(idea.updated_at || idea.created_at)}</span>
         </div>
       </li>
-    `).join("");
+    `);
 
     list.querySelectorAll(".ideas-item").forEach(li => {
       li.addEventListener("click", () => selectIdea(li.dataset.id));
@@ -87,6 +139,40 @@
     _editing = false;
     renderList();
     renderForm();
+  }
+
+  function renderFindings(idea) {
+    const findings = idea.findings || [];
+    if (!findings.length) {
+      return '<p class="hint ideas-findings-empty">No findings yet — ask an agent below.</p>';
+    }
+    return findings.map(f => `
+      <article class="ideas-finding" data-finding-id="${f.id}">
+        <div class="ideas-finding-head">
+          <strong>${escHtml(f.agent || "?")}</strong>
+          <span class="hint">${fmtDateTime(f.ts)}</span>
+          <button type="button" class="btn ghost small ideas-finding-del" data-id="${f.id}">×</button>
+        </div>
+        ${f.prompt ? `<p class="ideas-finding-prompt"><em>${escHtml(f.prompt)}</em></p>` : ""}
+        <pre class="ideas-finding-body">${escHtml(f.content)}</pre>
+      </article>
+    `).join("");
+  }
+
+  function renderDiscussions(idea) {
+    const items = idea.concept_discussions || [];
+    if (!items.length) {
+      return '<p class="hint">No discussion yet — publish the concept and open discussion with active agents.</p>';
+    }
+    return items.map(d => `
+      <article class="ideas-discussion">
+        <div class="ideas-discussion-head">
+          <strong>${escHtml(d.agent)}</strong>
+          <span class="hint">${fmtDateTime(d.ts)} · ${escHtml(d.source || "agent")}</span>
+        </div>
+        <pre class="ideas-finding-body">${escHtml(d.content)}</pre>
+      </article>
+    `).join("");
   }
 
   function renderForm() {
@@ -102,12 +188,8 @@
     if (_editing) {
       panel.innerHTML = `
         <div class="ideas-form">
-          <label>Title
-            <input id="ideas-edit-title" type="text" value="${escHtml(idea.title)}">
-          </label>
-          <label>Description
-            <textarea id="ideas-edit-desc" rows="4">${escHtml(idea.description || "")}</textarea>
-          </label>
+          <label>Title <input id="ideas-edit-title" type="text" value="${escHtml(idea.title)}"></label>
+          <label>Description <textarea id="ideas-edit-desc" rows="3">${escHtml(idea.description || "")}</textarea></label>
           <label>Priority
             <select id="ideas-edit-priority">
               <option value="high" ${idea.priority === "high" ? "selected" : ""}>High</option>
@@ -117,15 +199,12 @@
           </label>
           <label>Status
             <select id="ideas-edit-status">
-              <option value="draft" ${idea.status === "draft" ? "selected" : ""}>Draft</option>
-              <option value="queued" ${idea.status === "queued" ? "selected" : ""}>Queued</option>
-              <option value="in_progress" ${idea.status === "in_progress" ? "selected" : ""}>In progress</option>
-              <option value="done" ${idea.status === "done" ? "selected" : ""}>Done</option>
+              ${Object.keys(STATUS_LABEL).map(s =>
+                `<option value="${s}" ${idea.status === s ? "selected" : ""}>${STATUS_LABEL[s]}</option>`
+              ).join("")}
             </select>
           </label>
-          <label>Notes
-            <textarea id="ideas-edit-notes" rows="3">${escHtml(idea.notes || "")}</textarea>
-          </label>
+          <label>Notes <textarea id="ideas-edit-notes" rows="2">${escHtml(idea.notes || "")}</textarea></label>
           <div class="row" style="gap:0.5rem;margin-top:0.5rem">
             <button class="btn primary small" id="ideas-save-btn">Save</button>
             <button class="btn ghost small" id="ideas-cancel-edit-btn">Cancel</button>
@@ -137,33 +216,230 @@
       return;
     }
 
-    const canQueue = idea.status === "draft";
-    const canDone  = idea.status === "queued" || idea.status === "in_progress";
+    const agent = idea.brainstorm_agent || idea.assigned_agent || "";
+    const published = !!idea.concept_published_at;
+    const canQueue = ["draft", "exploring", "ready", "concept"].includes(idea.status);
+    const canDone = idea.status === "queued" || idea.status === "in_progress";
+
     panel.innerHTML = `
-      <div class="ideas-detail">
+      <div class="ideas-detail ideas-workflow">
         <div class="ideas-detail-header">
           <h3 class="ideas-detail-title">${escHtml(idea.title)}</h3>
           <span class="ideas-badge ${PRIORITY_CLASS[idea.priority] || ""}">${PRIORITY_LABEL[idea.priority] || idea.priority}</span>
           <span class="ideas-badge ${STATUS_CLASS[idea.status] || ""}">${STATUS_LABEL[idea.status] || idea.status}</span>
+          ${published ? '<span class="ideas-badge status-done">Published</span>' : ""}
         </div>
         ${idea.description ? `<p class="ideas-detail-desc">${escHtml(idea.description)}</p>` : ""}
-        ${idea.notes ? `<div class="ideas-detail-notes"><strong>Notes:</strong> ${escHtml(idea.notes)}</div>` : ""}
-        <p class="hint" style="margin-top:0.5rem">Added ${fmtDate(idea.created_at)}</p>
-        <div class="row" style="gap:0.5rem;margin-top:1rem;flex-wrap:wrap">
-          ${canQueue ? '<button class="btn primary small" id="ideas-queue-btn">Queue for auto-run</button>' : ""}
-          ${canDone  ? '<button class="btn ghost small" id="ideas-done-btn">Mark done</button>' : ""}
-          <button class="btn ghost small" id="ideas-edit-btn">Edit</button>
-          <button class="btn ghost small ideas-delete-btn" id="ideas-delete-btn">Delete</button>
-        </div>
+
+        <section class="ideas-section">
+          <h4>Brainstorm with agent</h4>
+          <p class="hint">Pick an agent to analyze feasibility, risks, and implementation options.</p>
+          <label>Agent
+            <select id="ideas-brainstorm-agent">${agentOptions(agent)}</select>
+          </label>
+          <label>Your question
+            <textarea id="ideas-brainstorm-msg" rows="2" placeholder="What are the main risks? How would you implement this?"></textarea>
+          </label>
+          <div class="row ideas-action-row">
+            <button class="btn primary small" id="ideas-brainstorm-btn" ${_busy ? "disabled" : ""}>Ask agent</button>
+            <button class="btn ghost small" id="ideas-terminal-btn">Open in terminal</button>
+          </div>
+        </section>
+
+        <section class="ideas-section">
+          <h4>Findings <span class="hint">(${(idea.findings || []).length})</span></h4>
+          <div id="ideas-findings-list" class="ideas-findings-list">${renderFindings(idea)}</div>
+          <label>Add finding manually
+            <textarea id="ideas-manual-finding" rows="2" placeholder="Paste notes or conclusions…"></textarea>
+          </label>
+          <button class="btn ghost small" id="ideas-save-finding-btn">Save finding</button>
+        </section>
+
+        <section class="ideas-section">
+          <h4>Concept</h4>
+          <p class="hint">Compile research into an execution concept, publish for team discussion, then forward when ready.</p>
+          <textarea id="ideas-concept-editor" class="ideas-concept-editor" rows="8">${escHtml(idea.concept || "")}</textarea>
+          <div class="row ideas-action-row">
+            <button class="btn ghost small" id="ideas-compile-btn">Build from findings</button>
+            <button class="btn ghost small" id="ideas-save-concept-btn">Save concept</button>
+            <button class="btn primary small" id="ideas-publish-btn" ${published ? "disabled" : ""}>Publish concept</button>
+          </div>
+        </section>
+
+        <section class="ideas-section" ${published ? "" : 'style="opacity:0.6"'}>
+          <h4>Agent discussion</h4>
+          <p class="hint">Share the published concept with every active agent terminal for review.</p>
+          <div id="ideas-discussions-list" class="ideas-discussions-list">${renderDiscussions(idea)}</div>
+          <div class="row ideas-action-row">
+            <button class="btn primary small" id="ideas-discuss-btn" ${published ? "" : "disabled"}>Discuss with active agents</button>
+            <button class="btn ghost small" id="ideas-forward-btn" ${published ? "" : "disabled"}>Forward for execution</button>
+          </div>
+        </section>
+
+        <section class="ideas-section ideas-exec-section">
+          <h4>Execution</h4>
+          <div class="row ideas-action-row">
+            ${canQueue ? '<button class="btn ghost small" id="ideas-queue-btn">Queue for auto-run</button>' : ""}
+            ${canDone ? '<button class="btn ghost small" id="ideas-done-btn">Mark done</button>' : ""}
+            <button class="btn ghost small" id="ideas-edit-btn">Edit</button>
+            <button class="btn ghost small ideas-delete-btn" id="ideas-delete-btn">Delete</button>
+          </div>
+        </section>
       </div>
     `;
-    if (canQueue) el("ideas-queue-btn").addEventListener("click", () => queueIdea(idea.id));
-    if (canDone)  el("ideas-done-btn").addEventListener("click",  () => markDone(idea.id));
-    el("ideas-edit-btn").addEventListener("click", () => { _editing = true; renderForm(); });
-    el("ideas-delete-btn").addEventListener("click", () => deleteIdea(idea.id));
+
+    wireFormActions(idea, { canQueue, canDone, published });
   }
 
-  // ── Add form ──────────────────────────────────────────────────────────────
+  function wireFormActions(idea, { canQueue, canDone, published }) {
+    el("ideas-brainstorm-btn")?.addEventListener("click", () => brainstorm(idea.id));
+    el("ideas-terminal-btn")?.addEventListener("click", () => openInTerminal(idea));
+    el("ideas-save-finding-btn")?.addEventListener("click", () => saveManualFinding(idea.id));
+    el("ideas-compile-btn")?.addEventListener("click", () => compileConcept(idea.id));
+    el("ideas-save-concept-btn")?.addEventListener("click", () => saveConcept(idea.id));
+    el("ideas-publish-btn")?.addEventListener("click", () => publishConcept(idea.id));
+    el("ideas-discuss-btn")?.addEventListener("click", () => discussConcept(idea.id));
+    el("ideas-forward-btn")?.addEventListener("click", () => forwardConcept(idea.id));
+    if (canQueue) el("ideas-queue-btn")?.addEventListener("click", () => queueIdea(idea.id));
+    if (canDone) el("ideas-done-btn")?.addEventListener("click", () => markDone(idea.id));
+    el("ideas-edit-btn")?.addEventListener("click", () => { _editing = true; renderForm(); });
+    el("ideas-delete-btn")?.addEventListener("click", () => deleteIdea(idea.id));
+    document.querySelectorAll(".ideas-finding-del").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteFinding(idea.id, btn.dataset.id);
+      });
+    });
+  }
+
+  async function patchIdea(id, body) {
+    const resp = await apiFetch("PATCH", `/api/ideas/${id}`, body);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const idx = _ideas.findIndex(i => i.id === id);
+    if (idx !== -1) _ideas[idx] = data.idea;
+    return data.idea;
+  }
+
+  async function brainstorm(id) {
+    const agent = el("ideas-brainstorm-agent")?.value;
+    const message = (el("ideas-brainstorm-msg")?.value || "").trim();
+    if (!agent || !message) return;
+    _busy = true;
+    renderForm();
+    const resp = await apiFetch("POST", `/api/ideas/${id}/brainstorm`, { agent, message });
+    _busy = false;
+    if (!resp.ok) {
+      alert("Brainstorm failed — is the agent CLI available?");
+      renderForm();
+      return;
+    }
+    const data = await resp.json();
+    const idx = _ideas.findIndex(i => i.id === id);
+    if (idx !== -1) _ideas[idx] = data.idea;
+    el("ideas-brainstorm-msg").value = "";
+    renderList();
+    renderForm();
+  }
+
+  function openInTerminal(idea) {
+    const agent = el("ideas-brainstorm-agent")?.value;
+    const message = (el("ideas-brainstorm-msg")?.value || "").trim();
+    if (!agent || !message || !window.AgentRelayTerminals?.deliverToAgent) {
+      alert("Select an agent and enter a question first.");
+      return;
+    }
+    const prompt = `[Idea brainstorm: ${idea.title}]\n\n${message}`;
+    const port = apiPort();
+    const token = authToken();
+    window.AgentRelayTerminals.deliverToAgent(agent, port, token, prompt, 5);
+    if (typeof window.showView === "function") window.showView("terminals");
+    else document.querySelector('.nav-item[data-view="terminals"]')?.click();
+  }
+
+  async function saveManualFinding(id) {
+    const content = (el("ideas-manual-finding")?.value || "").trim();
+    if (!content) return;
+    const agent = el("ideas-brainstorm-agent")?.value || "user";
+    const resp = await apiFetch("POST", `/api/ideas/${id}/findings`, { content, agent });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const idx = _ideas.findIndex(i => i.id === id);
+    if (idx !== -1) _ideas[idx] = data.idea;
+    renderList();
+    renderForm();
+  }
+
+  async function deleteFinding(ideaId, findingId) {
+    if (!confirm("Remove this finding?")) return;
+    const resp = await apiFetch("DELETE", `/api/ideas/${ideaId}/findings/${findingId}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const idx = _ideas.findIndex(i => i.id === ideaId);
+    if (idx !== -1) _ideas[idx] = data.idea;
+    renderForm();
+  }
+
+  async function compileConcept(id) {
+    const resp = await apiFetch("POST", `/api/ideas/${id}/compile-concept`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const idx = _ideas.findIndex(i => i.id === id);
+    if (idx !== -1) _ideas[idx] = data.idea;
+    renderList();
+    renderForm();
+  }
+
+  async function saveConcept(id) {
+    const concept = el("ideas-concept-editor")?.value || "";
+    const body = { concept };
+    if (concept.trim()) body.status = "ready";
+    await patchIdea(id, body);
+    renderList();
+    renderForm();
+  }
+
+  async function publishConcept(id) {
+    const concept = el("ideas-concept-editor")?.value || "";
+    if (concept.trim()) await patchIdea(id, { concept });
+    const resp = await apiFetch("POST", `/api/ideas/${id}/publish-concept`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const idx = _ideas.findIndex(i => i.id === id);
+    if (idx !== -1) _ideas[idx] = data.idea;
+    renderList();
+    renderForm();
+  }
+
+  async function discussConcept(id) {
+    const resp = await apiFetch("POST", `/api/ideas/${id}/discuss`, {});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.error || "Discussion failed — open agent terminals first.");
+      return;
+    }
+    const idx = _ideas.findIndex(i => i.id === id);
+    if (idx !== -1 && data.idea) _ideas[idx] = data.idea;
+    if (typeof window.showView === "function") window.showView("terminals");
+    renderForm();
+  }
+
+  async function forwardConcept(id) {
+    if (!confirm("Forward concept to all active agents and queue for execution?")) return;
+    const resp = await apiFetch("POST", `/api/ideas/${id}/forward-concept`, {
+      queue_execution: true,
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data.error || "Forward failed.");
+      return;
+    }
+    const idx = _ideas.findIndex(i => i.id === id);
+    if (idx !== -1 && data.idea) _ideas[idx] = data.idea;
+    renderList();
+    renderForm();
+    if (typeof window.showView === "function") window.showView("terminals");
+  }
 
   function renderAddForm() {
     const panel = formPanel();
@@ -174,10 +450,8 @@
     panel.innerHTML = `
       <div class="ideas-form">
         <h3 style="margin-bottom:0.75rem">New idea</h3>
-        <label>Title
-          <input id="ideas-new-title" type="text" placeholder="What's the idea?">
-        </label>
-        <label>Description <span class="hint" style="font-size:0.8rem">(optional)</span>
+        <label>Title <input id="ideas-new-title" type="text" placeholder="What's the idea?"></label>
+        <label>Description <span class="hint">(optional)</span>
           <textarea id="ideas-new-desc" rows="3" placeholder="More detail…"></textarea>
         </label>
         <label>Priority
@@ -198,31 +472,20 @@
     el("ideas-add-cancel").addEventListener("click", () => {
       panel.innerHTML = '<p class="ideas-form-hint">Select an idea or add a new one.</p>';
     });
-    el("ideas-new-title").addEventListener("keydown", e => {
-      if (e.key === "Enter") submitNewIdea();
-    });
   }
-
-  // ── CRUD actions ──────────────────────────────────────────────────────────
 
   async function submitNewIdea() {
     const title = (el("ideas-new-title")?.value || "").trim();
-    if (!title) { el("ideas-new-title")?.focus(); return; }
-    const body = {
+    if (!title) return;
+    const resp = await apiFetch("POST", "/api/ideas", {
       title,
       description: el("ideas-new-desc")?.value || "",
       priority: el("ideas-new-priority")?.value || "medium",
-    };
-    const resp = await apiFetch("POST", "/api/ideas", body);
+    });
     if (!resp.ok) return;
     const data = await resp.json();
     _ideas.unshift(data.idea);
-    _ideas.sort((a, b) => {
-      const PR = { high: 0, medium: 1, low: 2 };
-      return (PR[a.priority] ?? 1) - (PR[b.priority] ?? 1) || a.created_at - b.created_at;
-    });
     _selectedId = data.idea.id;
-    _editing = false;
     renderList();
     renderForm();
   }
@@ -235,33 +498,21 @@
       status: el("ideas-edit-status")?.value || "draft",
       notes: el("ideas-edit-notes")?.value || "",
     };
-    if (!body.title) { el("ideas-edit-title")?.focus(); return; }
-    const resp = await apiFetch("PATCH", `/api/ideas/${id}`, body);
-    if (!resp.ok) return;
-    const data = await resp.json();
-    const idx = _ideas.findIndex(i => i.id === id);
-    if (idx !== -1) _ideas[idx] = data.idea;
+    if (!body.title) return;
+    await patchIdea(id, body);
     _editing = false;
     renderList();
     renderForm();
   }
 
   async function queueIdea(id) {
-    const resp = await apiFetch("PATCH", `/api/ideas/${id}`, { status: "queued" });
-    if (!resp.ok) return;
-    const data = await resp.json();
-    const idx = _ideas.findIndex(i => i.id === id);
-    if (idx !== -1) _ideas[idx] = data.idea;
+    await patchIdea(id, { status: "queued" });
     renderList();
     renderForm();
   }
 
   async function markDone(id) {
-    const resp = await apiFetch("PATCH", `/api/ideas/${id}`, { status: "done" });
-    if (!resp.ok) return;
-    const data = await resp.json();
-    const idx = _ideas.findIndex(i => i.id === id);
-    if (idx !== -1) _ideas[idx] = data.idea;
+    await patchIdea(id, { status: "done" });
     renderList();
     renderForm();
   }
@@ -273,19 +524,14 @@
     _ideas = _ideas.filter(i => i.id !== id);
     _selectedId = null;
     renderList();
-    const panel = formPanel();
-    if (panel) panel.innerHTML = '<p class="ideas-form-hint">Select an idea or add a new one.</p>';
+    formPanel().innerHTML = '<p class="ideas-form-hint">Select an idea or add a new one.</p>';
   }
-
-  // ── Filters ───────────────────────────────────────────────────────────────
 
   function setFilter(f) {
     _filter = f;
     filterBtns().forEach(b => b.classList.toggle("active", b.dataset.filter === f));
     renderList();
   }
-
-  // ── Utility ───────────────────────────────────────────────────────────────
 
   function escHtml(s) {
     return String(s || "")
@@ -300,28 +546,24 @@
     return new Date(ts * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
 
-  // ── Init ──────────────────────────────────────────────────────────────────
+  function fmtDateTime(ts) {
+    if (!ts) return "";
+    return new Date(ts * 1000).toLocaleString(undefined, {
+      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    });
+  }
 
   function init() {
-    // Add idea button
-    const addBtn = el("ideas-add-btn");
-    if (addBtn) addBtn.addEventListener("click", renderAddForm);
-
-    // Filter buttons
+    el("ideas-add-btn")?.addEventListener("click", renderAddForm);
     filterBtns().forEach(btn => {
       btn.addEventListener("click", () => setFilter(btn.dataset.filter));
     });
-
-    // Load when view is shown
     document.querySelectorAll(".nav-item").forEach(btn => {
       btn.addEventListener("click", () => {
         if (btn.dataset.view === "ideas") loadIdeas();
       });
     });
-
-    // Reset form panel placeholder
-    const panel = formPanel();
-    if (panel) panel.innerHTML = '<p class="ideas-form-hint">Select an idea or add a new one.</p>';
+    formPanel().innerHTML = '<p class="ideas-form-hint">Select an idea or add a new one.</p>';
   }
 
   if (document.readyState === "loading") {
@@ -330,6 +572,5 @@
     init();
   }
 
-  // Expose for external refresh (e.g., when view activates)
   window.ideasLoad = loadIdeas;
 })();

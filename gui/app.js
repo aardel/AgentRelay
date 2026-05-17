@@ -82,7 +82,8 @@ async function loadPermissionProfiles() {
     for (const p of profileCatalog) {
       const opt = document.createElement("option");
       opt.value = p.id;
-      opt.textContent = PROFILE_UI_LABELS[p.id] || p.label || p.id;
+      const short = selectId === "launch-profile-terminals" && PROFILE_SHORT[p.id];
+      opt.textContent = short || PROFILE_UI_LABELS[p.id] || p.label || p.id;
       sel.appendChild(opt);
     }
   }
@@ -124,6 +125,7 @@ function showView(name) {
   if (view) view.classList.add("active");
   if (nav) nav.classList.add("active");
 }
+window.showView = showView;
 
 function setRelay(on) {
   el("status-badge").textContent = on ? "Running" : "Stopped";
@@ -892,17 +894,25 @@ el("btn-new-ssh-terminal").addEventListener("click", () => {
   }
 });
 
+function closeTerminalActionsMenu() {
+  const menu = el("terminal-actions-menu");
+  if (menu) menu.open = false;
+}
+
 el("btn-relay-selection").addEventListener("click", () => {
   const selection = window.AgentRelayTerminals?.getActiveSelection();
   if (!selection) {
     setFooter("No text selected in terminal");
+    closeTerminalActionsMenu();
     return;
   }
   relayContent(selection);
+  closeTerminalActionsMenu();
 });
 
 el("btn-clear-terminal").addEventListener("click", () => {
   window.AgentRelayTerminals?.clearActiveTerminal();
+  closeTerminalActionsMenu();
 });
 
 el("btn-launch-agent").addEventListener("click", async () => {
@@ -1055,6 +1065,33 @@ async function pollDeliveries() {
       setFooter(`Delivered message to ${agent} terminal`);
       showView("terminals");
     }
+  } catch {
+    /* daemon may be down */
+  }
+}
+
+async function pollWorkQueue() {
+  try {
+    const { ok, data } = await api("/api/work-queue/tick", { method: "POST" });
+    if (!ok || !data?.dispatched || !data.needs_terminal) return;
+    if (!window.AgentRelayTerminals?.deliverToAgent) return;
+    const agent = data.agent;
+    const prompt = data.prompt;
+    if (!agent || !prompt) return;
+    const workMeta = data.kind && data.id ? { kind: data.kind, id: data.id } : null;
+    window.AgentRelayTerminals.deliverToAgent(
+      agent,
+      API_PORT,
+      AUTH_TOKEN,
+      prompt,
+      data.wait_seconds || 5,
+      workMeta,
+    );
+    const label = data.kind === "bug" ? "bug" : "idea";
+    setFooter(`Auto-run: opened ${agent} for queued ${label}`);
+    showView("terminals");
+    if (window.ideasLoad) window.ideasLoad();
+    if (window.bugsLoad) window.bugsLoad();
   } catch {
     /* daemon may be down */
   }
@@ -1426,6 +1463,7 @@ refresh();
 refreshSkills();
 setInterval(refresh, 5000);
 setInterval(pollDeliveries, 500);
+setInterval(pollWorkQueue, 5000);
 setInterval(async () => {
   const inbox = await api(`/api/inbox?since=${lastInboxTs}`);
   const messages = inbox.data.messages || [];

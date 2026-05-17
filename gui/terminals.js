@@ -8,8 +8,24 @@
 
   let tabCounter = 0;
   const tabs = new Map();
-  /** @type {{ agent: string, prompt: string, waitSeconds: number }[]} */
+  /** @type {{ agent: string, prompt: string, waitSeconds: number, workMeta?: { kind: string, id: string } }[]} */
   const pendingDeliveries = [];
+
+  function bindWorkSession(sessionId, workMeta, port, token) {
+    if (!workMeta || !sessionId || !port || !token) return;
+    fetch(`http://127.0.0.1:${port}/api/work-queue/bind`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Agent-Token": token,
+      },
+      body: JSON.stringify({
+        session_id: sessionId,
+        kind: workMeta.kind,
+        id: workMeta.id,
+      }),
+    }).catch(() => {});
+  }
 
   // Multi-pane layout state
   let currentLayout = "1";
@@ -35,7 +51,7 @@
     return true;
   }
 
-  function flushPendingForAgent(agent) {
+  function flushPendingForAgent(agent, port, token) {
     const rest = [];
     for (const item of pendingDeliveries) {
       if (item.agent !== agent) {
@@ -46,6 +62,9 @@
       tabs.forEach((tab) => {
         if (tab.agent === agent && tab.sessionId && tab.writeToken) {
           delivered = injectPrompt(tab, item.prompt, item.waitSeconds) || delivered;
+          if (delivered && item.workMeta) {
+            bindWorkSession(tab.sessionId, item.workMeta, port, token);
+          }
         }
       });
       if (!delivered) rest.push(item);
@@ -58,12 +77,15 @@
    * Deliver a relay message into an open agent terminal (or queue until open_ack).
    * @returns {boolean} true if injected or queued for a pending session
    */
-  function deliverToAgent(agent, port, token, prompt, waitSeconds) {
+  function deliverToAgent(agent, port, token, prompt, waitSeconds, workMeta) {
     waitSeconds = waitSeconds || 5;
     let delivered = false;
     tabs.forEach((tab) => {
       if (tab.agent === agent && tab.sessionId && tab.writeToken) {
         delivered = injectPrompt(tab, prompt, waitSeconds) || delivered;
+        if (delivered && workMeta) {
+          bindWorkSession(tab.sessionId, workMeta, port, token);
+        }
       }
     });
     if (delivered) return true;
@@ -72,7 +94,7 @@
     if (!hasTab) {
       openTerminal(agent, port, token, { reuse: true, injectSnippet: false });
     }
-    pendingDeliveries.push({ agent, prompt, waitSeconds });
+    pendingDeliveries.push({ agent, prompt, waitSeconds, workMeta });
     return true;
   }
 
@@ -480,7 +502,10 @@
           fitAddon.fit();
           startUsagePolling(tab);
           if (typeof options.onOpen === "function") options.onOpen(frame);
-          if (tab.sessionType === "agent") flushPendingForAgent(tab.agent);
+          if (tab.sessionType === "agent") {
+            const host = tab.host || "127.0.0.1";
+            flushPendingForAgent(tab.agent, tab.port || port, tab.token || token);
+          }
           break;
         case "data":
           if (frame.data) writeVt(frame.data);

@@ -67,6 +67,7 @@ from ssh_hosts import (
 )
 from agent_data import AgentDataStore
 from idea_store import IdeaStore
+from bug_store import BugStore
 
 SERVICE_TYPE = "_agentrelay._tcp.local."
 INTERACTIVE_MODES = frozenset({"interactive", "interactive_tmux"})
@@ -828,6 +829,7 @@ class AgentRelay:
         self.pairing = PairingManager()
         self.agent_data = AgentDataStore()
         self.idea_store = IdeaStore()
+        self.bug_store = BugStore()
         self.azc: AsyncZeroconf | None = None
         self.browser: AsyncServiceBrowser | None = None
         self.service_info: ServiceInfo | None = None
@@ -2771,6 +2773,318 @@ class AgentRelay:
             return web.json_response({"error": "not found"}, status=404)
         return web.json_response({"ok": True})
 
+    async def _idea_or_404(self, idea_id: str) -> tuple[dict | None, web.Response | None]:
+        idea = self.idea_store.get(idea_id)
+        if idea is None:
+            return None, web.json_response({"error": "not found"}, status=404)
+        return idea, None
+
+    async def _run_idea_agent_query(
+        self, agent_name: str, prompt: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Run a one-shot agent query (background spawn) and return stdout."""
+        resolved = self.cfg.resolve_adapter_name(agent_name, prefer_interactive=False)
+        if not resolved or resolved not in self.cfg.adapters:
+            return "", {"status": "error", "exit_code": 1, "stderr": f"unknown agent: {agent_name}"}
+        adapter = self.cfg.adapters[resolved]
+        talk_cfg = dataclasses.replace(self.cfg, use_tmux=False)
+        result = await spawn_agent(talk_cfg, adapter, prompt)
+        content = (result.get("stdout") or "").strip()
+        if not content:
+            content = (result.get("stderr") or "").strip()
+        return content, result
+
+    async def handle_api_idea_brainstorm(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        idea_id = request.match_info["id"]
+        idea, err = await self._idea_or_404(idea_id)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        message = str(body.get("message", "")).strip()
+        agent = str(body.get("agent") or idea.get("brainstorm_agent") or self.cfg.default_agent or "").strip()
+        if not message:
+            return web.json_response({"error": "message required"}, status=400)
+        if not agent:
+            return web.json_response({"error": "agent required"}, status=400)
+        from idea_workflow import brainstorm_prompt
+
+        prompt = brainstorm_prompt(idea, message)
+        content, result = await self._run_idea_agent_query(agent, prompt)
+        if not content:
+            return web.json_response({
+                "ok": False,
+                "error": "empty response from agent",
+                "result": result,
+            }, status=502)
+        updated = self.idea_store.add_finding(
+            idea_id,
+            agent=agent,
+            content=content,
+            prompt=message,
+            source="agent",
+        )
+        self.idea_store.update(idea_id, brainstorm_agent=agent, assigned_agent=agent)
+        return web.json_response({
+            "ok": result.get("exit_code", 1) == 0,
+            "idea": updated,
+            "finding": updated["findings"][-1] if updated else None,
+            "reply": content,
+        })
+
+    async def handle_api_idea_add_finding(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        idea_id = request.match_info["id"]
+        _, err = await self._idea_or_404(idea_id)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        content = str(body.get("content", "")).strip()
+        if not content:
+            return web.json_response({"error": "content required"}, status=400)
+        agent = str(body.get("agent") or "user").strip()
+        updated = self.idea_store.add_finding(
+            idea_id, agent=agent, content=content, source="user",
+        )
+        return web.json_response({"idea": updated})
+
+    async def handle_api_idea_delete_finding(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        idea_id = request.match_info["id"]
+        finding_id = request.match_info["finding_id"]
+        updated = self.idea_store.remove_finding(idea_id, finding_id)
+        if updated is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"idea": updated})
+
+    async def handle_api_idea_compile_concept(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        idea_id = request.match_info["id"]
+        updated = self.idea_store.compile_concept(idea_id)
+        if updated is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"idea": updated})
+
+    async def handle_api_idea_publish_concept(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        idea_id = request.match_info["id"]
+        updated = self.idea_store.publish_concept(idea_id)
+        if updated is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"idea": updated})
+
+    async def handle_api_idea_discuss(self, request: web.Request) -> web.Response:
+        """Collect feedback from active agent terminals (or spawn if needed)."""
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        idea_id = request.match_info["id"]
+        idea, err = await self._idea_or_404(idea_id)
+        if err:
+            return err
+        if not idea.get("concept_published_at"):
+            return web.json_response(
+                {"error": "publish the concept before opening discussion"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        agents = body.get("agents")
+        if agents is None:
+            agents = list_active_agent_names()
+        if not agents:
+            return web.json_response(
+                {"error": "no active agents — open agent terminals first"}, status=400)
+        from idea_workflow import concept_discussion_prompt
+
+        prompt = concept_discussion_prompt(idea)
+        wait = self.cfg.wait_before_send_seconds
+        deliveries: list[dict[str, Any]] = []
+        for agent_name in agents:
+            resolved = self.cfg.resolve_adapter_name(
+                agent_name, prefer_interactive=True, active_agents=agents)
+            if not resolved:
+                continue
+            if await _deliver_prompt_to_pty(resolved, prompt, wait):
+                deliveries.append({"agent": resolved, "delivered": True, "mode": "terminal"})
+                self.idea_store.add_discussion(
+                    idea_id,
+                    agent=resolved,
+                    content=f"[Concept shared in terminal — awaiting agent reply]",
+                    source="system",
+                )
+            else:
+                content, result = await self._run_idea_agent_query(resolved, prompt)
+                if content:
+                    self.idea_store.add_discussion(
+                        idea_id, agent=resolved, content=content, source="agent",
+                    )
+                    deliveries.append({
+                        "agent": resolved, "delivered": True,
+                        "mode": "spawn", "exit_code": result.get("exit_code"),
+                    })
+        updated = self.idea_store.get(idea_id)
+        return web.json_response({
+            "ok": bool(deliveries),
+            "idea": updated,
+            "deliveries": deliveries,
+        })
+
+    async def handle_api_idea_forward_concept(self, request: web.Request) -> web.Response:
+        """Forward compiled concept to active agents and optionally queue execution."""
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        idea_id = request.match_info["id"]
+        idea, err = await self._idea_or_404(idea_id)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not (idea.get("concept") or "").strip():
+            idea = self.idea_store.compile_concept(idea_id) or idea
+        if not (idea.get("concept") or "").strip():
+            return web.json_response({"error": "concept is empty"}, status=400)
+        if not idea.get("concept_published_at"):
+            self.idea_store.publish_concept(idea_id)
+            idea = self.idea_store.get(idea_id) or idea
+
+        agents = body.get("agents") or list_active_agent_names()
+        if not agents:
+            return web.json_response(
+                {"error": "no active agents — open agent terminals first"}, status=400)
+        queue = bool(body.get("queue_execution", False))
+        from idea_workflow import concept_discussion_prompt, execution_prompt
+
+        discuss_prompt = concept_discussion_prompt(
+            idea,
+            round_note=(
+                "This concept is forwarded for team review before execution. "
+                "Discuss trade-offs openly."
+            ),
+        )
+        exec_prompt = execution_prompt(idea)
+        wait = self.cfg.wait_before_send_seconds
+        deliveries: list[dict[str, Any]] = []
+        for agent_name in agents:
+            resolved = self.cfg.resolve_adapter_name(
+                agent_name, prefer_interactive=True, active_agents=agents)
+            if not resolved:
+                continue
+            if await _deliver_prompt_to_pty(resolved, discuss_prompt, wait):
+                deliveries.append({"agent": resolved, "kind": "concept", "mode": "terminal"})
+                self.idea_store.add_discussion(
+                    idea_id,
+                    agent=resolved,
+                    content="[Concept forwarded to terminal for review]",
+                    source="system",
+                )
+            if exec_prompt and await _deliver_prompt_to_pty(
+                    resolved, exec_prompt, wait):
+                deliveries.append({"agent": resolved, "kind": "execute", "mode": "terminal"})
+        if queue:
+            assign = idea.get("assigned_agent") or idea.get("brainstorm_agent")
+            self.idea_store.update(
+                idea_id, status="queued",
+                assigned_agent=assign or agents[0] if agents else None,
+            )
+        updated = self.idea_store.get(idea_id)
+        return web.json_response({
+            "ok": bool(deliveries) or queue,
+            "idea": updated,
+            "deliveries": deliveries,
+            "queued": queue,
+        })
+
+    # ------------------------------------------------------------------ #
+    # Bugs API                                                             #
+    # ------------------------------------------------------------------ #
+
+    async def handle_api_bugs_list(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"bugs": self.bug_store.list_all()})
+
+    async def handle_api_bugs_create(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        title = str(body.get("title", "")).strip()
+        if not title:
+            return web.json_response({"error": "title required"}, status=400)
+        bug = self.bug_store.create(
+            title=title,
+            description=str(body.get("description", "")),
+            severity=str(body.get("severity", "medium")),
+            steps_to_reproduce=str(body.get("steps_to_reproduce", "")),
+        )
+        return web.json_response({"bug": bug}, status=201)
+
+    async def handle_api_bug_update(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        bug_id = request.match_info["id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        bug = self.bug_store.update(bug_id, **body)
+        if bug is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"bug": bug})
+
+    async def handle_api_bug_delete(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        bug_id = request.match_info["id"]
+        if not self.bug_store.delete(bug_id):
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    # ------------------------------------------------------------------ #
+    # Work queue (ideas + bugs auto-run when idle)                         #
+    # ------------------------------------------------------------------ #
+
+    async def handle_api_work_queue_tick(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        from work_queue_runner import try_dispatch_next
+
+        result = await try_dispatch_next(self)
+        return web.json_response(result)
+
+    async def handle_api_work_queue_bind(self, request: web.Request) -> web.Response:
+        if not self._auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        session_id = str(body.get("session_id", "")).strip()
+        kind = str(body.get("kind", "")).strip()
+        item_id = str(body.get("id", "")).strip()
+        if not session_id or kind not in ("idea", "bug") or not item_id:
+            return web.json_response({"error": "session_id, kind, id required"}, status=400)
+        from work_queue_runner import bind_work_session
+
+        if not bind_work_session(self, session_id, kind, item_id):
+            return web.json_response({"error": "session or work item not found"}, status=404)
+        return web.json_response({"ok": True})
+
     def build_app(self) -> web.Application:
         app = web.Application(client_max_size=16 * 1024 * 1024)  # 16 MB — large agent prompts can exceed 1 MB
         app.router.add_get("/health", self.handle_health)
@@ -2842,6 +3156,23 @@ class AgentRelay:
         app.router.add_post("/api/ideas", self.handle_api_ideas_create)
         app.router.add_patch("/api/ideas/{id}", self.handle_api_idea_update)
         app.router.add_delete("/api/ideas/{id}", self.handle_api_idea_delete)
+        app.router.add_post("/api/ideas/{id}/brainstorm", self.handle_api_idea_brainstorm)
+        app.router.add_post("/api/ideas/{id}/findings", self.handle_api_idea_add_finding)
+        app.router.add_delete(
+            "/api/ideas/{id}/findings/{finding_id}", self.handle_api_idea_delete_finding)
+        app.router.add_post(
+            "/api/ideas/{id}/compile-concept", self.handle_api_idea_compile_concept)
+        app.router.add_post(
+            "/api/ideas/{id}/publish-concept", self.handle_api_idea_publish_concept)
+        app.router.add_post("/api/ideas/{id}/discuss", self.handle_api_idea_discuss)
+        app.router.add_post(
+            "/api/ideas/{id}/forward-concept", self.handle_api_idea_forward_concept)
+        app.router.add_get("/api/bugs", self.handle_api_bugs_list)
+        app.router.add_post("/api/bugs", self.handle_api_bugs_create)
+        app.router.add_patch("/api/bugs/{id}", self.handle_api_bug_update)
+        app.router.add_delete("/api/bugs/{id}", self.handle_api_bug_delete)
+        app.router.add_post("/api/work-queue/tick", self.handle_api_work_queue_tick)
+        app.router.add_post("/api/work-queue/bind", self.handle_api_work_queue_bind)
         return app
 
 
